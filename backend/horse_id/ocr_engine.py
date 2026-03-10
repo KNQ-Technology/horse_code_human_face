@@ -18,12 +18,12 @@ logging.getLogger("ppocr").setLevel(logging.WARNING)
 class OCREngine:
     """OCR wrapper for ROI-level number recognition."""
 
-    def __init__(self, config: OCRConfig) -> None:
+    def __init__(self, config: OCRConfig, device: str = "gpu:0") -> None:
         self.config = config
         self.ocr = PaddleOCR(
             use_textline_orientation=False,
             lang=config.lang,
-            enable_mkldnn=False,
+            device=device,
         )
         self._regex = re.compile(config.regex_pattern)
         self._whitelist = set(config.whitelist)

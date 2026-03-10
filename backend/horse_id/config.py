@@ -15,6 +15,7 @@ class DetectorConfig:
     track_enabled: bool = True
     tracker_name: str = "bytetrack.yaml"
     track_persist: bool = True
+    device: str = "0"
 
 
 @dataclass
@@ -78,6 +79,9 @@ class RuntimeConfig:
     output_json: str
     progress_interval_frames: int = 20
     viz_mode: str = "debug"
+    target_direction: str = "both"
+    direction_min_frames: int = 5
+    direction_min_displacement: float = 30.0
 
 
 @dataclass

@@ -14,6 +14,8 @@ import numpy as np
 
 from horse_id.config import load_config, PipelineConfig
 from horse_id.detector import HorseDetector
+from horse_id.direction_filter import DirectionFilter
+from horse_id.types import HorseDetection, ROIBox
 from horse_id.enhancer import ROIEnhancer
 from horse_id.ocr_engine import OCREngine
 from horse_id.rider_identity import RiderIdentityConfig, RiderIdentityModule
@@ -190,7 +192,7 @@ def process_video(
     detector = HorseDetector(config.detector)
     roi_extractor = ROIExtractor(config.roi)
     enhancer = ROIEnhancer(config.enhance)
-    ocr_engine = OCREngine(config.ocr)
+    ocr_engine = OCREngine(config.ocr, device="gpu:0")
 
     vlm_fallback: VLMFallback | None = None
     if config.vlm_fallback and config.vlm_fallback.enabled and config.vlm_fallback.api_key:
@@ -202,6 +204,13 @@ def process_video(
     viz_mode = config.runtime.viz_mode if config.runtime.viz_mode else "display"
     print(f"[viz] mode={viz_mode}")
     track_fuser = OCRTrackFuser(config.fusion)
+    direction_filter = DirectionFilter(
+        target_direction=config.runtime.target_direction,
+        min_frames=config.runtime.direction_min_frames,
+        min_displacement_px=config.runtime.direction_min_displacement,
+    )
+    if direction_filter.target_direction != "both":
+        print(f"[direction] filter active: target={direction_filter.target_direction}")
     visualizer = ResultVisualizer(viz_mode=viz_mode)
 
     ri = config.rider_identity_settings
@@ -249,20 +258,35 @@ def process_video(
     frame_idx = 0
     start_ts = time.perf_counter()
 
+    _t_accum: dict[str, float] = {
+        "read": 0.0, "yolo": 0.0, "face_det": 0.0, "enhance": 0.0,
+        "ocr": 0.0, "vlm": 0.0, "rider_id": 0.0, "viz": 0.0, "write": 0.0,
+    }
+
     tasks[task_id]["message"] = "正在初始化 AI 模型..."
     tasks[task_id]["progress"] = 1
 
     while True:
+        _t0 = time.perf_counter()
         ok, frame = cap.read()
         if not ok:
             break
+        _t_accum["read"] += time.perf_counter() - _t0
 
+        _t0 = time.perf_counter()
         track_state.begin_frame()
         detections = detector.detect(frame)
-        rider_identity.begin_frame(frame)
+        _t_accum["yolo"] += time.perf_counter() - _t0
+
+        _t0 = time.perf_counter()
+        rider_identity.begin_frame(frame, frame_idx=frame_idx)
+        _t_accum["face_det"] += time.perf_counter() - _t0
+
         cur_h, cur_w = frame.shape[:2]
         det_with_roi = []
         rois = []
+        vis_detections: list[HorseDetection] = []
+        vis_rois: list[ROIBox] = []
         ocr_infos: list[dict[str, object]] = []
         first_roi_raw = None
         first_roi_enh = None
@@ -273,10 +297,17 @@ def process_video(
         first_ocr_valid = None
 
         for det in detections:
+            direction_filter.update(det.track_id, det.x)
+            if not direction_filter.should_process(det.track_id):
+                continue
+
             roi = roi_extractor.build_roi(det=det, frame_w=cur_w, frame_h=cur_h)
             rois.append(roi)
+            vis_detections.append(det)
+            vis_rois.append(roi)
             roi_crop = frame[roi.y1:roi.y2, roi.x1:roi.x2]
 
+            _te0 = time.perf_counter()
             if roi_crop.size == 0:
                 enhanced_gray = None
                 binary_img = None
@@ -285,7 +316,9 @@ def process_video(
                 enhanced_gray, binary_img = enhancer.enhance(roi_crop)
                 quality = enhancer.quality(enhanced_gray)
                 quality_payload = enhancer.serialize_quality(quality)
+            _t_accum["enhance"] += time.perf_counter() - _te0
 
+            _to0 = time.perf_counter()
             ocr_source = "empty"
             if roi_crop.size == 0:
                 ocr_payload: dict[str, object] = {"text": "", "conf": 0.0, "valid": False, "raw_text": ""}
@@ -313,8 +346,12 @@ def process_video(
                             "ocr_payload": dict(ocr_payload),
                         }
 
+            _t_accum["ocr"] += time.perf_counter() - _to0
+
+            _tv0 = time.perf_counter()
             vlm_detail: dict[str, str] = {}
-            if not ocr_payload["valid"] and vlm_fallback is not None:
+            track_already_locked = det.track_id is not None and det.track_id in track_fuser._locked_ids
+            if not ocr_payload["valid"] and vlm_fallback is not None and not track_already_locked:
                 vlm_result = vlm_fallback.infer(
                     track_id=det.track_id, frame=frame, det=det, frame_idx=frame_idx,
                 )
@@ -322,6 +359,7 @@ def process_video(
                 if vlm_result.valid:
                     ocr_payload = OCREngine.serialize(vlm_result)
                     ocr_source = "vlm_fallback"
+            _t_accum["vlm"] += time.perf_counter() - _tv0
 
             fused = track_fuser.update(
                 track_id=det.track_id,
@@ -337,9 +375,11 @@ def process_video(
                 fused_id=str(fused_payload["stable_id"]),
             )
             state_payload = state_result.to_dict()
+            _tr0 = time.perf_counter()
             rider_payload = rider_identity.identify(det=det, ocr_fused_payload=fused_payload)
+            _t_accum["rider_id"] += time.perf_counter() - _tr0
 
-            if first_roi_raw is None and roi_crop.size != 0 and enhanced_gray is not None and binary_img is not None:
+            if viz_mode == "debug" and first_roi_raw is None and roi_crop.size != 0 and enhanced_gray is not None and binary_img is not None:
                 first_roi_raw = roi_crop.copy()
                 first_roi_enh = enhanced_gray.copy()
                 first_roi_bin = binary_img.copy()
@@ -388,8 +428,9 @@ def process_video(
             }
             det_with_roi.append(item)
 
+        _tv0 = time.perf_counter()
         vis_frame = visualizer.draw_frame(
-            frame=frame, detections=detections, rois=rois, ocr_infos=ocr_infos,
+            frame=frame, detections=vis_detections, rois=vis_rois, ocr_infos=ocr_infos,
             unmatched_faces=rider_identity.unmatched_faces if rider_identity.enabled else None,
         )
         if viz_mode == "debug":
@@ -403,7 +444,10 @@ def process_video(
                 ocr_conf=first_ocr_conf,
                 ocr_valid=first_ocr_valid,
             )
+        _t_accum["viz"] += time.perf_counter() - _tv0
+        _tw0 = time.perf_counter()
         writer.write(vis_frame)
+        _t_accum["write"] += time.perf_counter() - _tw0
 
         frame_results.append({"frame_index": frame_idx, "detections": det_with_roi})
         track_state.end_frame()
@@ -421,6 +465,34 @@ def process_video(
 
     total_elapsed = max(1e-6, time.perf_counter() - start_ts)
     print(f"[processor] frames={frame_idx} elapsed={total_elapsed:.2f}s avg_fps={frame_idx / total_elapsed:.2f}")
+
+    print("\n" + "=" * 60)
+    print("[profiling] 各模块累计耗时 (秒 / 占比)")
+    print("=" * 60)
+    _t_total = sum(_t_accum.values())
+    _t_other = total_elapsed - _t_total
+    _labels = {
+        "read": "视频读取",
+        "yolo": "YOLO检测+ByteTrack",
+        "face_det": "人脸检测(SCRFD)",
+        "enhance": "ROI增强",
+        "ocr": "OCR识别(PaddleOCR)",
+        "vlm": "VLM回退(Qwen-API)",
+        "rider_id": "骑手身份识别",
+        "viz": "可视化绘制",
+        "write": "视频写入",
+    }
+    for key in ["read", "yolo", "face_det", "enhance", "ocr", "vlm", "rider_id", "viz", "write"]:
+        secs = _t_accum[key]
+        pct = secs / total_elapsed * 100.0 if total_elapsed > 0 else 0.0
+        avg_ms = secs / max(1, frame_idx) * 1000.0
+        print(f"  {_labels[key]:<22s} {secs:8.2f}s  ({pct:5.1f}%)  avg {avg_ms:6.1f}ms/帧")
+    if _t_other > 0:
+        pct = _t_other / total_elapsed * 100.0
+        avg_ms = _t_other / max(1, frame_idx) * 1000.0
+        print(f"  {'其他(融合/状态/IO)':<22s} {_t_other:8.2f}s  ({pct:5.1f}%)  avg {avg_ms:6.1f}ms/帧")
+    print(f"  {'总计':<22s} {total_elapsed:8.2f}s  (100.0%)")
+    print("=" * 60)
 
     duration_sec = frame_idx / max(fps, 1.0)
     mm = int(duration_sec) // 60

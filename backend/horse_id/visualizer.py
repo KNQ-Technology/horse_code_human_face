@@ -63,6 +63,43 @@ def _put_text_pil(
     canvas[:] = cv2.cvtColor(np.asarray(pil_img), cv2.COLOR_RGB2BGR)
 
 
+class PilBatchRenderer:
+    """Context manager for batched PIL text rendering.
+
+    Converts canvas BGR->RGB once on enter, accumulates draw calls,
+    then converts back RGB->BGR once on exit.
+    """
+
+    def __init__(self, canvas: np.ndarray) -> None:
+        self._canvas = canvas
+        self._pil_img: Image.Image | None = None
+        self._draw: ImageDraw.ImageDraw | None = None
+
+    def __enter__(self) -> "PilBatchRenderer":
+        self._pil_img = Image.fromarray(cv2.cvtColor(self._canvas, cv2.COLOR_BGR2RGB))
+        self._draw = ImageDraw.Draw(self._pil_img)
+        return self
+
+    def text(
+        self,
+        xy: tuple[int, int],
+        text: str,
+        font_size: int,
+        color_bgr: tuple[int, int, int],
+    ) -> None:
+        if self._draw is None:
+            return
+        font = _get_font(font_size)
+        rgb = (color_bgr[2], color_bgr[1], color_bgr[0])
+        self._draw.text(xy, text, font=font, fill=rgb)
+
+    def __exit__(self, *_: object) -> None:
+        if self._pil_img is not None:
+            self._canvas[:] = cv2.cvtColor(np.asarray(self._pil_img), cv2.COLOR_RGB2BGR)
+        self._pil_img = None
+        self._draw = None
+
+
 class ResultVisualizer:
     """Draw detection and ROI overlays for quick visual inspection."""
 
@@ -204,13 +241,7 @@ class ResultVisualizer:
         rider_source: str,
         rider_score: float,
     ) -> None:
-        """Display mode: minimal overlay with horse number and rider name only.
-
-        Rider name is shown only when the identification source is
-        trustworthy (direct face match or face-locked) AND the score
-        exceeds a display-level threshold, filtering out weak matches
-        from horse_map / temporal / color / store alone.
-        """
+        """Display mode: minimal overlay with horse number and rider name only."""
         cv2.rectangle(canvas, (x1, y1), (x2, y2), _COLOR_WHITE, 2)
 
         track_tag = "" if det.track_id is None else f"T{det.track_id}"
@@ -219,11 +250,6 @@ class ResultVisualizer:
         tw, th = _text_size_pil(horse_label, fs_horse)
         label_x = x1
         label_y = max(0, y1 - th - 28)
-        overlay = canvas.copy()
-        cv2.rectangle(overlay, (label_x - 4, label_y - 4),
-                      (label_x + tw + 8, label_y + th + 4), (0, 0, 0), -1)
-        cv2.addWeighted(overlay, 0.6, canvas, 0.4, 0, canvas)
-        _put_text_pil(canvas, horse_label, (label_x, label_y), fs_horse, _COLOR_WHITE)
 
         show_rider = (
             rider_matched
@@ -240,11 +266,17 @@ class ResultVisualizer:
         fs_rider = 20
         rw, rh = _text_size_pil(rider_label, fs_rider)
         ry = label_y + th + 8
-        overlay2 = canvas.copy()
-        cv2.rectangle(overlay2, (label_x - 4, ry - 2),
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (label_x - 4, label_y - 4),
+                      (label_x + tw + 8, label_y + th + 4), (0, 0, 0), -1)
+        cv2.rectangle(overlay, (label_x - 4, ry - 2),
                       (label_x + rw + 8, ry + rh + 2), (0, 0, 0), -1)
-        cv2.addWeighted(overlay2, 0.6, canvas, 0.4, 0, canvas)
-        _put_text_pil(canvas, rider_label, (label_x, ry), fs_rider, rider_color)
+        cv2.addWeighted(overlay, 0.6, canvas, 0.4, 0, canvas)
+
+        with PilBatchRenderer(canvas) as pil:
+            pil.text((label_x, label_y), horse_label, fs_horse, _COLOR_WHITE)
+            pil.text((label_x, ry), rider_label, fs_rider, rider_color)
 
     @staticmethod
     def _draw_face_box(
@@ -311,65 +343,67 @@ class ResultVisualizer:
         cv2.rectangle(overlay, (x0, y0), (x0 + box_w, y0 + box_h), (20, 20, 20), -1)
         cv2.addWeighted(overlay, 0.75, canvas, 0.25, 0, canvas)
         cv2.rectangle(canvas, (x0, y0), (x0 + box_w, y0 + box_h), (200, 200, 200), 1)
-        _put_text_pil(canvas, "Frame Summary (OCR + Rider Identity)", (x0 + 8, y0 + 4), 18, (240, 240, 240))
 
-        cur_line = 0
-        for i, info in enumerate(ocr_infos, start=1):
-            cur_line += 1
-            track_id = info.get("track_id")
-            text = str(info.get("text", ""))
-            conf = float(info.get("conf", 0.0))
-            valid = bool(info.get("valid", False))
-            source = str(info.get("ocr_source", ""))
-            stable_id = str(info.get("stable_id", ""))
-            stable_ready = bool(info.get("stable_ready", False))
-            state = str(info.get("state", "UNCONFIRMED"))
-            state_id = str(info.get("state_id", ""))
-            rider_name = str(info.get("rider_name", ""))
-            rider_score = float(info.get("rider_score", 0.0))
-            rider_matched = bool(info.get("rider_matched", False))
-            rider_source = str(info.get("rider_source", "none"))
+        with PilBatchRenderer(canvas) as pil:
+            pil.text((x0 + 8, y0 + 4), "Frame Summary (OCR + Rider Identity)", 18, (240, 240, 240))
 
-            status = "OK" if valid else "NG"
-            text_show = text if text else "--"
-            stable_show = stable_id if stable_ready and stable_id else "--"
-            state_id_show = state_id if state_id else "--"
-            track_str = f"T{track_id}" if track_id is not None else "T-"
-            src_tag = f"<{source}>" if source and source not in ("empty", "fresh") else ""
-
-            ocr_part = f"H{i}/{track_str}: {text_show} c={conf:.2f} id={stable_show} st={state}/{state_id_show} [{status}]{src_tag}"
-
-            face_detected_s = bool(info.get("face_detected", False))
-            if rider_matched and rider_name:
-                rider_part = f" | {rider_name}({rider_score:.2f})[{rider_source}]"
-                rider_color = _SOURCE_COLORS.get(rider_source, (180, 180, 180))
-            elif face_detected_s:
-                rider_part = " | someone"
-                rider_color = _COLOR_YELLOW
-            else:
-                rider_part = " | rider:--"
-                rider_color = _COLOR_RIDER_UNMATCHED
-
-            fs_summary = 16
-            line_y_top = y0 + 4 + line_h * cur_line
-            ocr_color = (120, 255, 120) if valid else (120, 120, 255)
-            _put_text_pil(canvas, ocr_part, (x0 + 8, line_y_top), fs_summary, ocr_color)
-
-            ocr_tw, _ = _text_size_pil(ocr_part, fs_summary)
-            _put_text_pil(canvas, rider_part, (x0 + 8 + ocr_tw, line_y_top), fs_summary, rider_color)
-
-            vlm_bg = str(info.get("vlm_bg", ""))
-            vlm_font = str(info.get("vlm_font", ""))
-            vlm_number = str(info.get("vlm_number", ""))
-            vlm_full = str(info.get("vlm_full_id", ""))
-            if vlm_bg or vlm_number:
+            cur_line = 0
+            for i, info in enumerate(ocr_infos, start=1):
                 cur_line += 1
-                vlm_line = f"    VLM: bg={vlm_bg} font={vlm_font} num={vlm_number}"
-                if vlm_full:
-                    vlm_line += f" => {vlm_full}"
-                vlm_y_top = y0 + 4 + line_h * cur_line
-                vlm_color = (255, 220, 100) if vlm_full else (100, 100, 255)
-                _put_text_pil(canvas, vlm_line, (x0 + 8, vlm_y_top), 15, vlm_color)
+                track_id = info.get("track_id")
+                text = str(info.get("text", ""))
+                conf = float(info.get("conf", 0.0))
+                valid = bool(info.get("valid", False))
+                source = str(info.get("ocr_source", ""))
+                stable_id = str(info.get("stable_id", ""))
+                stable_ready = bool(info.get("stable_ready", False))
+                state = str(info.get("state", "UNCONFIRMED"))
+                state_id = str(info.get("state_id", ""))
+                rider_name = str(info.get("rider_name", ""))
+                rider_score = float(info.get("rider_score", 0.0))
+                rider_matched = bool(info.get("rider_matched", False))
+                rider_source = str(info.get("rider_source", "none"))
+
+                status = "OK" if valid else "NG"
+                text_show = text if text else "--"
+                stable_show = stable_id if stable_ready and stable_id else "--"
+                state_id_show = state_id if state_id else "--"
+                track_str = f"T{track_id}" if track_id is not None else "T-"
+                src_tag = f"<{source}>" if source and source not in ("empty", "fresh") else ""
+
+                ocr_part = f"H{i}/{track_str}: {text_show} c={conf:.2f} id={stable_show} st={state}/{state_id_show} [{status}]{src_tag}"
+
+                face_detected_s = bool(info.get("face_detected", False))
+                if rider_matched and rider_name:
+                    rider_part = f" | {rider_name}({rider_score:.2f})[{rider_source}]"
+                    rider_color = _SOURCE_COLORS.get(rider_source, (180, 180, 180))
+                elif face_detected_s:
+                    rider_part = " | someone"
+                    rider_color = _COLOR_YELLOW
+                else:
+                    rider_part = " | rider:--"
+                    rider_color = _COLOR_RIDER_UNMATCHED
+
+                fs_summary = 16
+                line_y_top = y0 + 4 + line_h * cur_line
+                ocr_color = (120, 255, 120) if valid else (120, 120, 255)
+                pil.text((x0 + 8, line_y_top), ocr_part, fs_summary, ocr_color)
+
+                ocr_tw, _ = _text_size_pil(ocr_part, fs_summary)
+                pil.text((x0 + 8 + ocr_tw, line_y_top), rider_part, fs_summary, rider_color)
+
+                vlm_bg = str(info.get("vlm_bg", ""))
+                vlm_font = str(info.get("vlm_font", ""))
+                vlm_number = str(info.get("vlm_number", ""))
+                vlm_full = str(info.get("vlm_full_id", ""))
+                if vlm_bg or vlm_number:
+                    cur_line += 1
+                    vlm_line = f"    VLM: bg={vlm_bg} font={vlm_font} num={vlm_number}"
+                    if vlm_full:
+                        vlm_line += f" => {vlm_full}"
+                    vlm_y_top = y0 + 4 + line_h * cur_line
+                    vlm_color = (255, 220, 100) if vlm_full else (100, 100, 255)
+                    pil.text((x0 + 8, vlm_y_top), vlm_line, 15, vlm_color)
 
     def draw_roi_comparison_panel(
         self,

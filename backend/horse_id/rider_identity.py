@@ -35,6 +35,7 @@ class RiderIdentityConfig:
     face_lock_threshold: int = 3
     face_lock_max_hold: int = 90
     face_lock_challenge: int = 5
+    face_interval: int = 3
 
 
 @dataclass
@@ -256,6 +257,9 @@ class RiderIdentityModule:
             self._known_face_names = self._face_backend.get_all_known_names()
         self._feature_store = RiderFeatureStore(config.feature_store_path, known_names=self._known_face_names)
 
+        self._face_frame_counter: int = 0
+        self._cached_frame_faces: list[dict[str, Any]] = []
+
         self._enabled = self._face_backend is not None or bool(self._horse_to_riders)
 
     @property
@@ -353,13 +357,18 @@ class RiderIdentityModule:
             return bound_horse == hid
         return True
 
-    def begin_frame(self, frame: np.ndarray) -> None:
+    def begin_frame(self, frame: np.ndarray, frame_idx: int = -1) -> None:
         self._frame = frame
         self._frame_used_face_indices = set()
         if self._face_backend is None:
             self._frame_faces = []
             return
-        self._frame_faces = self._face_backend.recognize_faces(frame)
+        self._face_frame_counter += 1
+        if self._face_frame_counter % self.config.face_interval == 1 or self.config.face_interval <= 1:
+            self._frame_faces = self._face_backend.recognize_faces(frame)
+            self._cached_frame_faces = list(self._frame_faces)
+        else:
+            self._frame_faces = list(self._cached_frame_faces)
 
     @staticmethod
     def _cosine_similarity(vec_a: np.ndarray, vec_b: np.ndarray, eps: float = 1e-9) -> float:

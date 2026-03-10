@@ -47,6 +47,8 @@ class VLMFallback:
         self._last_call_frame: dict[int, int] = {}
         self._last_details: dict[int | None, dict[str, str]] = {}
         self._last_valid_result: dict[int, OCRResult] = {}
+        self._pending_tracks: set[int] = set()
+        self._lock = __import__("threading").Lock()
 
         from openai import OpenAI
         self._client = OpenAI(
@@ -105,30 +107,17 @@ class VLMFallback:
         y2 = min(fh, int(det.y + det.h / 2))
         return frame[y1:y2, x1:x2]
 
-    def infer(
+    def _call_api_sync(
         self,
-        track_id: int | None,
-        frame: np.ndarray,
-        det: HorseDetection,
+        track_id: int,
+        crop_bgr: np.ndarray,
         frame_idx: int,
-    ) -> OCRResult:
-        if track_id is not None:
-            last = self._last_call_frame.get(track_id, -9999)
-            if frame_idx - last < self.config.cooldown_frames:
-                cached = self._last_valid_result.get(track_id)
-                if cached is not None:
-                    logger.debug("VLM cooldown: reusing cached result for track %s => %s", track_id, cached.text)
-                    return cached
-                return _EMPTY
-
-        crop = self._crop_horse(frame, det)
-        if crop.size == 0:
-            return _EMPTY
-
-        b64 = self._encode_image(crop)
+    ) -> None:
+        """Run VLM API call in background thread. Writes result to caches."""
+        b64 = self._encode_image(crop_bgr)
         if not b64:
-            return _EMPTY
-
+            self._pending_tracks.discard(track_id)
+            return
         try:
             resp = self._client.chat.completions.create(
                 model=self.config.model,
@@ -148,34 +137,72 @@ class VLMFallback:
             raw_text = resp.choices[0].message.content or ""
         except Exception:
             logger.warning("VLM API call failed for track %s frame %d", track_id, frame_idx, exc_info=True)
-            return _EMPTY
+            self._pending_tracks.discard(track_id)
+            return
 
-        if track_id is not None:
+        with self._lock:
             self._last_call_frame[track_id] = frame_idx
 
         bg, font, number = self._parse_response(raw_text)
         prefix = self._map_color_to_prefix(bg, font) if bg else ""
         full_id = (prefix + number) if prefix and number else ""
 
-        self._last_details[track_id] = {
-            "bg_color": bg,
-            "font_color": font,
-            "number": number,
-            "prefix": prefix,
-            "full_id": full_id,
-            "raw": raw_text,
-        }
+        with self._lock:
+            self._last_details[track_id] = {
+                "bg_color": bg,
+                "font_color": font,
+                "number": number,
+                "prefix": prefix,
+                "full_id": full_id,
+                "raw": raw_text,
+            }
 
-        if not number:
-            logger.debug("VLM returned no number: %s", raw_text)
-            return OCRResult(text="", conf=0.0, valid=False, raw_text=raw_text)
+        if number and prefix:
+            result = OCRResult(text=full_id, conf=0.85, valid=True, raw_text=raw_text)
+            with self._lock:
+                self._last_valid_result[track_id] = result
+            logger.info("VLM async done: track=%s => %s", track_id, full_id)
 
-        if not prefix:
-            logger.debug("VLM color unmapped (bg=%s font=%s): %s", bg, font, raw_text)
-            return OCRResult(text="", conf=0.0, valid=False, raw_text=raw_text)
+        self._pending_tracks.discard(track_id)
 
-        logger.info("VLM fallback: track=%s => %s (bg=%s font=%s num=%s)", track_id, full_id, bg, font, number)
-        result = OCRResult(text=full_id, conf=0.85, valid=True, raw_text=raw_text)
-        if track_id is not None:
-            self._last_valid_result[track_id] = result
-        return result
+    def infer(
+        self,
+        track_id: int | None,
+        frame: np.ndarray,
+        det: HorseDetection,
+        frame_idx: int,
+    ) -> OCRResult:
+        if track_id is None:
+            return _EMPTY
+
+        with self._lock:
+            last = self._last_call_frame.get(track_id, -9999)
+            if frame_idx - last < self.config.cooldown_frames:
+                cached = self._last_valid_result.get(track_id)
+                if cached is not None:
+                    return cached
+                return _EMPTY
+
+        if track_id in self._pending_tracks:
+            cached = self._last_valid_result.get(track_id)
+            return cached if cached is not None else _EMPTY
+
+        crop = self._crop_horse(frame, det)
+        if crop.size == 0:
+            return _EMPTY
+
+        crop_copy = crop.copy()
+        self._pending_tracks.add(track_id)
+        with self._lock:
+            self._last_call_frame[track_id] = frame_idx
+
+        import threading
+        t = threading.Thread(
+            target=self._call_api_sync,
+            args=(track_id, crop_copy, frame_idx),
+            daemon=True,
+        )
+        t.start()
+
+        cached = self._last_valid_result.get(track_id)
+        return cached if cached is not None else _EMPTY

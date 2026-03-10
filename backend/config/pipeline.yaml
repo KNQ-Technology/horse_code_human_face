@@ -5,6 +5,7 @@ detector:
   track_enabled: true
   tracker_name: "bytetrack.yaml"
   track_persist: true
+  device: "cpu"
 
 roi:
   x_min_ratio: 0.18
@@ -32,7 +33,7 @@ ocr:
   expected_min_len: 3
   expected_max_len: 4
   regex_pattern: "^[A-Z][0-9]{2,3}$"
-  interval_frames: 2
+  interval_frames: 5
 
 fusion:
   window_size: 15
@@ -47,6 +48,9 @@ runtime:
   output_json: ""
   progress_interval_frames: 20
   viz_mode: "display"
+  target_direction: "right_to_left"
+  direction_min_frames: 5
+  direction_min_displacement: 30.0
 
 rider_identity:
   face_db_uri: "/home/hshan/Hor-Peo_detect/rider.db"
@@ -65,4 +69,4 @@ vlm_fallback:
   model: "qwen-vl-max"
   timeout: 15.0
   max_retries: 1
-  cooldown_frames: 10
+  cooldown_frames: 75

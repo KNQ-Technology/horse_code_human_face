@@ -16,6 +16,7 @@ class HorseDetector:
     def __init__(self, config: DetectorConfig) -> None:
         self.config = config
         self.model = YOLO(config.model_path)
+        self._device = getattr(config, "device", "0")
 
     def detect(self, frame: np.ndarray) -> list[HorseDetection]:
         """Run detector and return filtered horse detections."""
@@ -27,6 +28,7 @@ class HorseDetector:
                 tracker=self.config.tracker_name,
                 persist=self.config.track_persist,
                 verbose=False,
+                device=self._device,
             )
         else:
             results = self.model.predict(
@@ -34,6 +36,7 @@ class HorseDetector:
                 conf=self.config.conf_threshold,
                 iou=self.config.iou_threshold,
                 verbose=False,
+                device=self._device,
             )
         if not results:
             return []
