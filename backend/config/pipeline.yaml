@@ -46,10 +46,21 @@ runtime:
   output_video: ""
   output_json: ""
   progress_interval_frames: 20
+  viz_mode: "display"
+
+rider_identity:
+  face_db_uri: "/home/hshan/Hor-Peo_detect/rider.db"
+  face_collection: "rider_faces"
+  face_dim: 512
+  face_min_score: 0.3
+  face_device: "cuda"
+  face_models_dir: "horse_id/models"
+  horse_rider_map: ""
+  feature_store_path: "outputs/rider_identity.sqlite"
 
 vlm_fallback:
-  enabled: false
-  api_key: ""
+  enabled: true
+  api_key: "sk-719e95ee5d37494b9951203864312e2d"
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   model: "qwen-vl-max"
   timeout: 15.0

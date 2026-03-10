@@ -47,13 +47,10 @@ def process_video_task(task_id: str, filename: str):
             output_video_path=processed_path,
             tasks=tasks,
             config_path=CONFIG_PATH,
-            face_db_uri=os.environ.get("FACE_DB_URI", ""),
-            face_models_dir=os.environ.get("FACE_MODELS_DIR", ""),
-            horse_rider_map=os.environ.get("HORSE_RIDER_MAP", ""),
         )
         tasks[task_id]["status"] = "completed"
         tasks[task_id]["progress"] = 100
-        tasks[task_id]["processed_video_url"] = f"http://localhost:8000/videos/{processed_filename}"
+        tasks[task_id]["processed_video_url"] = f"http://localhost:8001/videos/{processed_filename}"
         tasks[task_id]["result"] = result
     except Exception as e:
         traceback.print_exc()
@@ -121,4 +118,4 @@ async def serve_vue(full_path: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8001)

@@ -173,9 +173,6 @@ def process_video(
     output_video_path: str,
     tasks: dict,
     config_path: str = "config/pipeline.yaml",
-    face_db_uri: str = "",
-    face_models_dir: str = "",
-    horse_rider_map: str = "",
 ) -> dict[str, Any]:
     """Run the full detection pipeline on an uploaded video.
 
@@ -185,11 +182,6 @@ def process_video(
     config.runtime.input_video = video_path
     config.runtime.output_video = output_video_path
     config.runtime.output_json = ""
-
-    vlm_api_key = os.environ.get("VLM_API_KEY", "")
-    if vlm_api_key and config.vlm_fallback:
-        config.vlm_fallback.api_key = vlm_api_key
-        config.vlm_fallback.enabled = True
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
@@ -207,14 +199,22 @@ def process_video(
     else:
         print("[vlm_fallback] disabled")
 
+    viz_mode = config.runtime.viz_mode if config.runtime.viz_mode else "display"
+    print(f"[viz] mode={viz_mode}")
     track_fuser = OCRTrackFuser(config.fusion)
-    visualizer = ResultVisualizer()
+    visualizer = ResultVisualizer(viz_mode=viz_mode)
 
+    ri = config.rider_identity_settings
     rider_identity = RiderIdentityModule(
         RiderIdentityConfig(
-            face_db_uri=face_db_uri,
-            face_models_dir=face_models_dir,
-            horse_rider_map_path=horse_rider_map,
+            face_db_uri=ri.face_db_uri if ri else "",
+            face_collection=ri.face_collection if ri else "rider_faces",
+            face_dim=ri.face_dim if ri else 512,
+            face_min_score=ri.face_min_score if ri else 0.3,
+            face_device=ri.face_device if ri else "cuda",
+            face_models_dir=ri.face_models_dir if ri else "",
+            horse_rider_map_path=ri.horse_rider_map if ri else "",
+            feature_store_path=ri.feature_store_path if ri else "outputs/rider_identity.sqlite",
         )
     )
     if rider_identity.enabled:
@@ -392,16 +392,17 @@ def process_video(
             frame=frame, detections=detections, rois=rois, ocr_infos=ocr_infos,
             unmatched_faces=rider_identity.unmatched_faces if rider_identity.enabled else None,
         )
-        vis_frame = visualizer.draw_roi_comparison_panel(
-            frame=vis_frame,
-            roi_original_bgr=first_roi_raw,
-            roi_enhanced_gray=first_roi_enh,
-            roi_binary=first_roi_bin,
-            quality_score=first_quality_score,
-            ocr_text=first_ocr_text,
-            ocr_conf=first_ocr_conf,
-            ocr_valid=first_ocr_valid,
-        )
+        if viz_mode == "debug":
+            vis_frame = visualizer.draw_roi_comparison_panel(
+                frame=vis_frame,
+                roi_original_bgr=first_roi_raw,
+                roi_enhanced_gray=first_roi_enh,
+                roi_binary=first_roi_bin,
+                quality_score=first_quality_score,
+                ocr_text=first_ocr_text,
+                ocr_conf=first_ocr_conf,
+                ocr_valid=first_ocr_valid,
+            )
         writer.write(vis_frame)
 
         frame_results.append({"frame_index": frame_idx, "detections": det_with_roi})

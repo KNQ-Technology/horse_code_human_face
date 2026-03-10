@@ -77,6 +77,19 @@ class RuntimeConfig:
     output_video: str
     output_json: str
     progress_interval_frames: int = 20
+    viz_mode: str = "debug"
+
+
+@dataclass
+class RiderIdentitySettingsConfig:
+    face_db_uri: str = ""
+    face_collection: str = "rider_faces"
+    face_dim: int = 512
+    face_min_score: float = 0.3
+    face_device: str = "cuda"
+    face_models_dir: str = ""
+    horse_rider_map: str = ""
+    feature_store_path: str = "outputs/rider_identity.sqlite"
 
 
 @dataclass
@@ -87,6 +100,7 @@ class PipelineConfig:
     ocr: OCRConfig
     fusion: FusionConfig
     runtime: RuntimeConfig
+    rider_identity_settings: RiderIdentitySettingsConfig | None = None
     vlm_fallback: VLMFallbackConfig | None = None
 
 
@@ -102,6 +116,8 @@ def load_config(config_path: str | Path) -> PipelineConfig:
     data = _load_yaml(Path(config_path))
     vlm_data = data.get("vlm_fallback", {})
     vlm_fallback = VLMFallbackConfig(**vlm_data) if vlm_data else None
+    ri_data = data.get("rider_identity", {})
+    rider_identity_settings = RiderIdentitySettingsConfig(**ri_data) if ri_data else None
     return PipelineConfig(
         detector=DetectorConfig(**data["detector"]),
         roi=ROIConfig(**data["roi"]),
@@ -109,6 +125,7 @@ def load_config(config_path: str | Path) -> PipelineConfig:
         ocr=OCRConfig(**data["ocr"]),
         fusion=FusionConfig(**data["fusion"]),
         runtime=RuntimeConfig(**data["runtime"]),
+        rider_identity_settings=rider_identity_settings,
         vlm_fallback=vlm_fallback,
     )
 

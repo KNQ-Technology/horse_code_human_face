@@ -45,7 +45,7 @@ const checkStatus = async () => {
   if (!taskId.value) return;
 
   try {
-    const response = await axios.get(`http://localhost:8000/api/status?task_id=${taskId.value}`);
+    const response = await axios.get(`http://localhost:8001/api/status?task_id=${taskId.value}`);
     const { code, data } = response.data;
     
     if (code === 200) {
@@ -89,7 +89,7 @@ const startUpload = async () => {
   formData.append('video', videoFile.value);
 
   try {
-    const response = await axios.post('http://localhost:8000/api/upload', formData, {
+    const response = await axios.post('http://localhost:8001/api/upload', formData, {
       onUploadProgress: (progressEvent) => {
         uploadProgress.value = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
       }

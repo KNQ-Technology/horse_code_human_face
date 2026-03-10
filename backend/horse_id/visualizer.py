@@ -66,6 +66,9 @@ def _put_text_pil(
 class ResultVisualizer:
     """Draw detection and ROI overlays for quick visual inspection."""
 
+    def __init__(self, viz_mode: str = "debug"):
+        self._viz_mode = viz_mode
+
     def draw_frame(
         self,
         frame: np.ndarray,
@@ -81,9 +84,6 @@ class ResultVisualizer:
             horse_y1 = int(round(det.y - det.h / 2.0))
             horse_x2 = int(round(det.x + det.w / 2.0))
             horse_y2 = int(round(det.y + det.h / 2.0))
-
-            cv2.rectangle(canvas, (horse_x1, horse_y1), (horse_x2, horse_y2), _COLOR_GREEN, 2)
-            cv2.rectangle(canvas, (roi.x1, roi.y1), (roi.x2, roi.y2), _COLOR_ORANGE, 2)
 
             track_label = "--" if det.track_id is None else f"T{det.track_id}"
             stable_label = "--"
@@ -111,6 +111,17 @@ class ResultVisualizer:
                     face_bbox = [int(v) for v in raw_bbox[:4]]
                 face_score = float(info.get("face_score", 0.0))
                 face_detected = bool(info.get("face_detected", False))
+
+            if self._viz_mode == "display":
+                self._draw_display_mode(
+                    canvas, idx, det, horse_x1, horse_y1, horse_x2, horse_y2,
+                    stable_label, rider_name, rider_matched,
+                    rider_source, rider_score,
+                )
+                continue
+
+            cv2.rectangle(canvas, (horse_x1, horse_y1), (horse_x2, horse_y2), _COLOR_GREEN, 2)
+            cv2.rectangle(canvas, (roi.x1, roi.y1), (roi.x2, roi.y2), _COLOR_ORANGE, 2)
 
             label_main = f"H{idx} {track_label} conf={det.conf:.2f}"
             label_state = f"ID={stable_label} state={state_label}"
@@ -164,18 +175,76 @@ class ResultVisualizer:
                     cv2.putText(canvas, vlm_label, (tx, vy),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.50, _COLOR_CYAN, 2, cv2.LINE_AA)
 
-        if unmatched_faces:
-            for face in unmatched_faces:
-                bbox = face.get("bbox", [])
-                if isinstance(bbox, list) and len(bbox) >= 4:
-                    face_bbox_u = [int(v) for v in bbox[:4]]
-                    score = float(face.get("score", 0.0))
-                    name = str(face.get("name", "")) if score > 0 else ""
-                    self._draw_face_box(canvas, face_bbox_u, name, score)
+        if self._viz_mode == "debug":
+            if unmatched_faces:
+                for face in unmatched_faces:
+                    bbox = face.get("bbox", [])
+                    if isinstance(bbox, list) and len(bbox) >= 4:
+                        face_bbox_u = [int(v) for v in bbox[:4]]
+                        score = float(face.get("score", 0.0))
+                        name = str(face.get("name", "")) if score > 0 else ""
+                        self._draw_face_box(canvas, face_bbox_u, name, score)
 
-        if ocr_infos:
-            self._draw_ocr_summary(canvas, ocr_infos)
+            if ocr_infos:
+                self._draw_ocr_summary(canvas, ocr_infos)
         return canvas
+
+    _DISPLAY_TRUSTED_SOURCES = {"face", "face_locked"}
+    _DISPLAY_MIN_RIDER_SCORE = 0.35
+
+    @staticmethod
+    def _draw_display_mode(
+        canvas: np.ndarray,
+        idx: int,
+        det: HorseDetection,
+        x1: int, y1: int, x2: int, y2: int,
+        stable_id: str,
+        rider_name: str,
+        rider_matched: bool,
+        rider_source: str,
+        rider_score: float,
+    ) -> None:
+        """Display mode: minimal overlay with horse number and rider name only.
+
+        Rider name is shown only when the identification source is
+        trustworthy (direct face match or face-locked) AND the score
+        exceeds a display-level threshold, filtering out weak matches
+        from horse_map / temporal / color / store alone.
+        """
+        cv2.rectangle(canvas, (x1, y1), (x2, y2), _COLOR_WHITE, 2)
+
+        track_tag = "" if det.track_id is None else f"T{det.track_id}"
+        horse_label = f"#{stable_id}" if stable_id != "--" else (track_tag or f"#{idx}")
+        fs_horse = 24
+        tw, th = _text_size_pil(horse_label, fs_horse)
+        label_x = x1
+        label_y = max(0, y1 - th - 28)
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (label_x - 4, label_y - 4),
+                      (label_x + tw + 8, label_y + th + 4), (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.6, canvas, 0.4, 0, canvas)
+        _put_text_pil(canvas, horse_label, (label_x, label_y), fs_horse, _COLOR_WHITE)
+
+        show_rider = (
+            rider_matched
+            and rider_name
+            and rider_source in ResultVisualizer._DISPLAY_TRUSTED_SOURCES
+            and rider_score >= ResultVisualizer._DISPLAY_MIN_RIDER_SCORE
+        )
+        if show_rider:
+            rider_label = f"骑手: {rider_name}"
+            rider_color = (100, 255, 100)
+        else:
+            rider_label = "骑手: --"
+            rider_color = (180, 180, 180)
+        fs_rider = 20
+        rw, rh = _text_size_pil(rider_label, fs_rider)
+        ry = label_y + th + 8
+        overlay2 = canvas.copy()
+        cv2.rectangle(overlay2, (label_x - 4, ry - 2),
+                      (label_x + rw + 8, ry + rh + 2), (0, 0, 0), -1)
+        cv2.addWeighted(overlay2, 0.6, canvas, 0.4, 0, canvas)
+        _put_text_pil(canvas, rider_label, (label_x, ry), fs_rider, rider_color)
 
     @staticmethod
     def _draw_face_box(
