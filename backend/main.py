@@ -2,23 +2,22 @@ from fastapi import FastAPI, UploadFile, File, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+import traceback
 import uuid
-import time
 import os
 import shutil
 from typing import Dict
 
+from processor import process_video
+
 app = FastAPI()
 
-# Video storage directories
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VIDEOS_DIR = os.path.join(BASE_DIR, "videos")
 UPLOAD_DIR = os.path.join(VIDEOS_DIR, "upload")
 
-# Ensure directories exist
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-# Enable CORS (Optional in production if same origin)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -27,58 +26,39 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory storage for task status
 tasks: Dict[str, dict] = {}
 
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "pipeline.yaml")
+
+
 def process_video_task(task_id: str, filename: str):
-    """Simulate backend processing logic"""
     tasks[task_id]["status"] = "processing"
-    
-    # Path of uploaded video
+
     uploaded_path = os.path.join(UPLOAD_DIR, f"{task_id}_{filename}")
-    # Path for processed video
-    processed_filename = f"processed_{task_id}_{filename}"
+
+    base_name, ext = os.path.splitext(filename)
+    processed_filename = f"processed_{task_id}_{base_name}.mp4"
     processed_path = os.path.join(VIDEOS_DIR, processed_filename)
-    
-    for i in range(0, 101, 10):
-        tasks[task_id]["progress"] = i
-        tasks[task_id]["message"] = f"正在进行 AI 识别... {i}%"
-        time.sleep(1)  # Simulate work
-        
-    # Simulate processing result by copying the original file
-    if os.path.exists(uploaded_path):
-        shutil.copy(uploaded_path, processed_path)
-        
-    tasks[task_id]["status"] = "completed"
-    tasks[task_id]["progress"] = 100
-    # Point to the locally served video
-    tasks[task_id]["processed_video_url"] = f"http://localhost:8000/videos/{processed_filename}"
-    tasks[task_id]["result"] = {
-        "filename": filename,
-        "duration": "00:30",
-        "resolution": "1920x1080",
-        "processed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-        "detections": [
-            {
-                "timestamp": "00:05",
-                "horse_id": "H001",
-                "person_name": "张三",
-                "confidence": "0.98_0.95"
-            },
-            {
-                "timestamp": "00:12",
-                "horse_id": "H005",
-                "person_name": "李四",
-                "confidence": "0.92_0.88"
-            },
-            {
-                "timestamp": "00:25",
-                "horse_id": "H003",
-                "person_name": "王五",
-                "confidence": "0.95_0.91"
-            }
-        ]
-    }
+
+    try:
+        result = process_video(
+            task_id=task_id,
+            video_path=uploaded_path,
+            output_video_path=processed_path,
+            tasks=tasks,
+            config_path=CONFIG_PATH,
+            face_db_uri=os.environ.get("FACE_DB_URI", ""),
+            face_models_dir=os.environ.get("FACE_MODELS_DIR", ""),
+            horse_rider_map=os.environ.get("HORSE_RIDER_MAP", ""),
+        )
+        tasks[task_id]["status"] = "completed"
+        tasks[task_id]["progress"] = 100
+        tasks[task_id]["processed_video_url"] = f"http://localhost:8000/videos/{processed_filename}"
+        tasks[task_id]["result"] = result
+    except Exception as e:
+        traceback.print_exc()
+        tasks[task_id]["status"] = "error"
+        tasks[task_id]["message"] = f"处理失败: {e}"
 
 @app.post("/api/upload")
 async def upload_video(background_tasks: BackgroundTasks, video: UploadFile = File(...)):
