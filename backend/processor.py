@@ -114,15 +114,26 @@ def _frame_to_timestamp(frame_idx: int, fps: float) -> str:
     return f"{mm:02d}:{ss:02d}"
 
 
+_INDEPENDENT_FACE_SOURCE = "face"
+
+MIN_CONFIRMED_FRAMES = 10
+MIN_FACE_FRAMES_FOR_RIDER = 5
+MIN_AVG_CONF = 0.50
+MIN_DURATION_SEC = 2.0
+
+
 def _aggregate_detections(
     frame_results: list[dict[str, Any]], fps: float
 ) -> list[dict[str, str]]:
     """Aggregate per-frame detections into a summary for the frontend.
 
-    Groups by track_id and picks the best-confidence snapshot for each
-    confirmed horse/rider pair.
+    Strategy:
+    1. Per track, count confirmed frames per stable_id → pick the best horse_id.
+    2. Filter: only keep tracks that reached CONFIRMED with ≥ MIN_CONFIRMED_FRAMES.
+    3. Group by horse_id across all tracks → one row per horse.
+    4. Pick best rider by source priority then score.
     """
-    best_by_track: dict[int, dict[str, Any]] = {}
+    track_info: dict[int, dict[str, Any]] = {}
 
     for fr in frame_results:
         for det in fr.get("detections", []):
@@ -134,31 +145,119 @@ def _aggregate_detections(
             fused = det.get("ocr_fused", {})
             rider = det.get("rider_identity", {})
 
+            status = str(state.get("status", "UNCONFIRMED"))
             stable_id = str(fused.get("stable_id", ""))
             rider_name = str(rider.get("name", ""))
-            horse_conf = float(det.get("conf", 0))
             rider_score = float(rider.get("score", 0))
+            rider_source = str(rider.get("source", "none"))
+            horse_conf = float(det.get("conf", 0))
 
-            if not stable_id and not rider_name:
-                continue
-
-            prev = best_by_track.get(track_id)
-            if prev is None or horse_conf > prev["horse_conf"]:
-                best_by_track[track_id] = {
-                    "frame_index": fr["frame_index"],
-                    "stable_id": stable_id,
-                    "rider_name": rider_name,
-                    "horse_conf": horse_conf,
-                    "rider_score": rider_score,
-                    "status": state.get("status", ""),
+            if track_id not in track_info:
+                track_info[track_id] = {
+                    "confirmed_by_id": {},
+                    "confs_by_id": {},
+                    "frames_by_id": {},
+                    "total_frames": 0,
+                    "riders_by_id": {},
+                    "best_conf": 0.0,
+                    "best_frame": 0,
                 }
+            ti = track_info[track_id]
+            ti["total_frames"] += 1
+            frame_idx_val = fr["frame_index"]
+
+            if status == "CONFIRMED" and stable_id:
+                ti["confirmed_by_id"][stable_id] = ti["confirmed_by_id"].get(stable_id, 0) + 1
+                if stable_id not in ti["confs_by_id"]:
+                    ti["confs_by_id"][stable_id] = []
+                ti["confs_by_id"][stable_id].append(horse_conf)
+                if stable_id not in ti["frames_by_id"]:
+                    ti["frames_by_id"][stable_id] = [frame_idx_val, frame_idx_val]
+                else:
+                    rng = ti["frames_by_id"][stable_id]
+                    rng[0] = min(rng[0], frame_idx_val)
+                    rng[1] = max(rng[1], frame_idx_val)
+
+            if rider_name and status == "CONFIRMED" and stable_id:
+                if stable_id not in ti["riders_by_id"]:
+                    ti["riders_by_id"][stable_id] = []
+                ti["riders_by_id"][stable_id].append((rider_name, rider_score, rider_source))
+
+            if horse_conf > ti["best_conf"]:
+                ti["best_conf"] = horse_conf
+                ti["best_frame"] = frame_idx_val
+
+    horse_groups: dict[str, dict[str, Any]] = {}
+
+    for _tid, ti in track_info.items():
+        if not ti["confirmed_by_id"]:
+            continue
+
+        best_id = max(ti["confirmed_by_id"], key=ti["confirmed_by_id"].get)  # type: ignore[arg-type]
+        confirmed_count = ti["confirmed_by_id"][best_id]
+
+        if confirmed_count < MIN_CONFIRMED_FRAMES:
+            continue
+
+        if best_id not in horse_groups:
+            horse_groups[best_id] = {
+                "confirmed_frames": 0,
+                "riders": [],
+                "confs": [],
+                "first_frame": 999999999,
+                "last_frame": 0,
+                "best_conf": 0.0,
+                "best_frame": 0,
+            }
+        hg = horse_groups[best_id]
+        hg["confirmed_frames"] += confirmed_count
+        hg["riders"].extend(ti["riders_by_id"].get(best_id, []))
+        hg["confs"].extend(ti["confs_by_id"].get(best_id, []))
+        if best_id in ti["frames_by_id"]:
+            rng = ti["frames_by_id"][best_id]
+            hg["first_frame"] = min(hg["first_frame"], rng[0])
+            hg["last_frame"] = max(hg["last_frame"], rng[1])
+        if ti["best_conf"] > hg["best_conf"]:
+            hg["best_conf"] = ti["best_conf"]
+            hg["best_frame"] = ti["best_frame"]
 
     results = []
-    for _tid, info in sorted(best_by_track.items()):
-        horse_id = info["stable_id"] if info["stable_id"] else f"T{_tid}"
-        person_name = info["rider_name"] if info["rider_name"] else "其他骑师"
-        conf_str = f"{info['horse_conf']:.2f}_{info['rider_score']:.2f}"
-        timestamp = _frame_to_timestamp(info["frame_index"], fps)
+    for horse_id in sorted(horse_groups.keys()):
+        hg = horse_groups[horse_id]
+
+        avg_conf = sum(hg["confs"]) / len(hg["confs"]) if hg["confs"] else 0.0
+        if avg_conf < MIN_AVG_CONF:
+            continue
+
+        duration_frames = hg["last_frame"] - hg["first_frame"] + 1
+        duration_sec = duration_frames / max(fps, 1.0)
+        if duration_sec < MIN_DURATION_SEC:
+            continue
+
+        rider_name = ""
+        rider_score = 0.0
+        if hg["riders"]:
+            face_count: dict[str, int] = {}
+            score_sum: dict[str, float] = {}
+            for rname, rscore, rsource in hg["riders"]:
+                if rsource == _INDEPENDENT_FACE_SOURCE:
+                    face_count[rname] = face_count.get(rname, 0) + 1
+                    score_sum[rname] = score_sum.get(rname, 0.0) + rscore
+
+            candidates = {
+                name: cnt for name, cnt in face_count.items()
+                if cnt >= MIN_FACE_FRAMES_FOR_RIDER
+            }
+            if candidates:
+                rider_name = max(
+                    candidates,
+                    key=lambda n: (candidates[n], score_sum[n] / face_count[n]),
+                )
+                rider_score = score_sum[rider_name] / face_count[rider_name]
+
+        person_name = rider_name if rider_name else "其他骑师"
+        conf_str = f"{hg['best_conf']:.2f}_{rider_score:.2f}"
+        timestamp = _frame_to_timestamp(hg["best_frame"], fps)
         results.append({
             "timestamp": timestamp,
             "horse_id": horse_id,

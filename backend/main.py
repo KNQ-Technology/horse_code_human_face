@@ -50,7 +50,7 @@ def process_video_task(task_id: str, filename: str):
         )
         tasks[task_id]["status"] = "completed"
         tasks[task_id]["progress"] = 100
-        tasks[task_id]["processed_video_url"] = f"http://localhost:8001/videos/{processed_filename}"
+        tasks[task_id]["processed_video_url"] = f"/videos/{processed_filename}"
         tasks[task_id]["result"] = result
     except Exception as e:
         traceback.print_exc()

@@ -3,6 +3,8 @@ import { ref, computed } from 'vue';
 import { Upload, FileVideo, CheckCircle, Loader2, PlayCircle, History, Plus } from 'lucide-vue-next';
 import axios from 'axios';
 
+const API_BASE = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8001`;
+
 const fileInput = ref<HTMLInputElement | null>(null);
 const videoFile = ref<File | null>(null);
 const videoUrl = ref<string | null>(null);
@@ -13,6 +15,7 @@ const processingProgress = ref(0);
 const processingStatus = ref<'idle' | 'uploading' | 'processing' | 'completed' | 'error'>('idle');
 const processingResult = ref<any>(null);
 const taskId = ref<string | null>(null);
+const errorMessage = ref<string>('');
 
 const statusText = computed(() => {
   switch (processingStatus.value) {
@@ -38,32 +41,48 @@ const handleFileUpload = (event: Event) => {
     processingProgress.value = 0;
     processingStatus.value = 'idle';
     processingResult.value = null;
+    errorMessage.value = '';
   }
 };
+
+let statusRetryCount = 0;
+const MAX_STATUS_RETRIES = 5;
 
 const checkStatus = async () => {
   if (!taskId.value) return;
 
   try {
-    const response = await axios.get(`http://localhost:8001/api/status?task_id=${taskId.value}`);
+    const response = await axios.get(`${API_BASE}/api/status?task_id=${taskId.value}`);
     const { code, data } = response.data;
-    
+    statusRetryCount = 0;
+
     if (code === 200) {
       processingProgress.value = data.progress;
       processingStatus.value = data.status;
-      
+
       if (data.status === 'completed') {
-        processedVideoUrl.value = data.processed_video_url;
+        const videoPath = data.processed_video_url as string;
+        processedVideoUrl.value = videoPath.startsWith('http') ? videoPath : `${API_BASE}${videoPath}`;
         videoMode.value = 'processed';
         processingResult.value = data.result;
+      } else if (data.status === 'error') {
+        errorMessage.value = data.message || '后端处理时出错';
       } else if (data.status === 'processing' || data.status === 'uploading') {
-        // Continue polling every 1 second
         setTimeout(checkStatus, 1000);
       }
+    } else if (code === 404) {
+      errorMessage.value = '任务不存在，可能后端已重启';
+      processingStatus.value = 'error';
     }
   } catch (error) {
     console.error('Status check failed', error);
-    processingStatus.value = 'error';
+    statusRetryCount++;
+    if (statusRetryCount < MAX_STATUS_RETRIES) {
+      setTimeout(checkStatus, 2000);
+    } else {
+      errorMessage.value = '无法连接后端服务，请检查后端是否正在运行';
+      processingStatus.value = 'error';
+    }
   }
 };
 
@@ -74,10 +93,11 @@ const resetUpload = () => {
   videoMode.value = 'original';
   uploadProgress.value = 0;
   processingProgress.value = 0;
-  processingStatus.value = 'idle';
-  processingResult.value = null;
-  taskId.value = null;
-};
+    processingStatus.value = 'idle';
+    processingResult.value = null;
+    taskId.value = null;
+    errorMessage.value = '';
+  };
 
 const startUpload = async () => {
   if (!videoFile.value) return;
@@ -89,7 +109,7 @@ const startUpload = async () => {
   formData.append('video', videoFile.value);
 
   try {
-    const response = await axios.post('http://localhost:8001/api/upload', formData, {
+    const response = await axios.post(`${API_BASE}/api/upload`, formData, {
       onUploadProgress: (progressEvent) => {
         uploadProgress.value = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
       }
@@ -305,6 +325,15 @@ const startUpload = async () => {
                 </div>
                 <h3>等待任务提交</h3>
                 <p>请在左侧上传视频并点击开始处理按钮</p>
+              </div>
+
+              <div v-else-if="processingStatus === 'error'" class="error-state">
+                <div class="error-icon-wrapper">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                </div>
+                <h3>处理失败</h3>
+                <p>{{ errorMessage || '未知错误，请重试' }}</p>
+                <button class="retry-button" @click="resetUpload()">重新上传</button>
               </div>
 
               <div v-else class="loading-state">
@@ -767,6 +796,52 @@ const startUpload = async () => {
   max-height: 200px;
   overflow-y: auto;
   border: 1px solid #1e293b;
+}
+
+/* Error state */
+.error-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 3rem 1rem;
+}
+
+.error-icon-wrapper {
+  margin-bottom: 1.5rem;
+  color: #ef4444;
+}
+
+.error-state h3 {
+  font-size: 1.1rem;
+  margin-bottom: 0.75rem;
+  color: #f1f5f9;
+}
+
+.error-state p {
+  font-size: 0.9rem;
+  color: #94a3b8;
+  max-width: 300px;
+  margin-bottom: 1.5rem;
+}
+
+.retry-button {
+  padding: 0.6rem 1.5rem;
+  background-color: #1e293b;
+  color: #e2e8f0;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  transition: all 0.2s;
+}
+
+.retry-button:hover {
+  background-color: #334155;
+  border-color: #475569;
 }
 
 /* Empty & Loading states */

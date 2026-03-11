@@ -6,6 +6,7 @@ export default defineConfig({
   plugins: [vue()],
   server: {
     host: true,
+    allowedHosts: true,
     watch: {
       usePolling: true,
     },
