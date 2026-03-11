@@ -261,7 +261,7 @@ class ResultVisualizer:
             rider_label = f"骑手: {rider_name}"
             rider_color = (100, 255, 100)
         else:
-            rider_label = "骑手: --"
+            rider_label = "骑手: 其他骑师"
             rider_color = (180, 180, 180)
         fs_rider = 20
         rw, rh = _text_size_pil(rider_label, fs_rider)

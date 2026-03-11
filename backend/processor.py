@@ -156,7 +156,7 @@ def _aggregate_detections(
     results = []
     for _tid, info in sorted(best_by_track.items()):
         horse_id = info["stable_id"] if info["stable_id"] else f"T{_tid}"
-        person_name = info["rider_name"] if info["rider_name"] else "未识别"
+        person_name = info["rider_name"] if info["rider_name"] else "其他骑师"
         conf_str = f"{info['horse_conf']:.2f}_{info['rider_score']:.2f}"
         timestamp = _frame_to_timestamp(info["frame_index"], fps)
         results.append({

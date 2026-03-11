@@ -37,16 +37,21 @@ class FusedTrackResult:
 class OCRTrackFuser:
     """Fuse frame-level OCR into a stable track-level ID."""
 
-    VLM_WEIGHT_BOOST = 5.0
+    OCR_WEIGHT_BOOST = 3.0
+    VLM_WEIGHT_BOOST = 1.5
     LOCK_MIN_VOTES = 5
     LOCK_MIN_RATIO = 0.55
+    OCR_FAST_LOCK_VOTES = 2
+    VLM_PRE_READY_MIN = 8
 
     def __init__(self, config: FusionConfig) -> None:
         self.config = config
         self._buffers: dict[int, deque[TrackVote]] = {}
         self._locked_ids: dict[int, str] = {}
+        self._lock_source: dict[int, str] = {}
         self._cum_weight: dict[int, dict[str, float]] = {}
         self._cum_count: dict[int, dict[str, int]] = {}
+        self._ocr_count: dict[int, dict[str, int]] = {}
 
     def update(
         self, track_id: int | None, text: str, conf: float, valid: bool, source: str = "ocr",
@@ -67,15 +72,22 @@ class OCRTrackFuser:
 
         if valid and text:
             weight = max(0.0, conf)
-            if source == "vlm_fallback":
+            if source in ("fresh", "cached"):
+                weight *= self.OCR_WEIGHT_BOOST
+            elif source == "vlm_fallback":
                 weight *= self.VLM_WEIGHT_BOOST
             cw = self._cum_weight.setdefault(track_id, {})
             cw[text] = cw.get(text, 0.0) + weight
             cc = self._cum_count.setdefault(track_id, {})
             cc[text] = cc.get(text, 0) + 1
+            oc = self._ocr_count.setdefault(track_id, {})
+            if source in ("fresh", "cached"):
+                oc[text] = oc.get(text, 0) + 1
 
         if track_id not in self._locked_ids:
             self._try_lock(track_id)
+        elif self._lock_source.get(track_id) == "vlm":
+            self._try_ocr_override(track_id)
 
         if track_id in self._locked_ids:
             sample_count = len(self._buffers[track_id])
@@ -98,7 +110,16 @@ class OCRTrackFuser:
                 vote_ratio = cw[best_text] / total_weight
                 support_count = cc.get(best_text, 0)
                 stable_conf = cw[best_text] / max(1, support_count)
-                pre_ready = support_count >= 2 and vote_ratio >= self.LOCK_MIN_RATIO
+                oc = self._ocr_count.get(track_id, {})
+                has_ocr = bool(oc)
+                if has_ocr:
+                    best_ocr = max(oc, key=oc.get)  # type: ignore[arg-type]
+                    if best_ocr != best_text:
+                        pre_ready = False
+                    else:
+                        pre_ready = support_count >= 2 and vote_ratio >= self.LOCK_MIN_RATIO
+                else:
+                    pre_ready = support_count >= self.VLM_PRE_READY_MIN and vote_ratio >= self.LOCK_MIN_RATIO
                 return FusedTrackResult(
                     stable_id=best_text if pre_ready else "",
                     stable_conf=stable_conf,
@@ -122,7 +143,21 @@ class OCRTrackFuser:
         cc = self._cum_count.get(track_id)
         if not cw or not cc:
             return
+
+        oc = self._ocr_count.get(track_id, {})
+        if oc:
+            best_ocr = max(oc, key=oc.get)  # type: ignore[arg-type]
+            if oc[best_ocr] >= self.OCR_FAST_LOCK_VOTES:
+                self._locked_ids[track_id] = best_ocr
+                self._lock_source[track_id] = "ocr"
+                return
+
+        if not oc:
+            return
+
         best_text = max(cw, key=cw.get)  # type: ignore[arg-type]
+        if best_text not in oc:
+            return
         best_count = cc.get(best_text, 0)
         if best_count < self.LOCK_MIN_VOTES:
             return
@@ -131,6 +166,17 @@ class OCRTrackFuser:
             return
         if cw[best_text] / total_weight >= self.LOCK_MIN_RATIO:
             self._locked_ids[track_id] = best_text
+            self._lock_source[track_id] = "ocr"
+
+    def _try_ocr_override(self, track_id: int) -> None:
+        """Allow OCR fast-lock to override a VLM-sourced lock."""
+        oc = self._ocr_count.get(track_id, {})
+        if not oc:
+            return
+        best_ocr = max(oc, key=oc.get)  # type: ignore[arg-type]
+        if oc[best_ocr] >= self.OCR_FAST_LOCK_VOTES:
+            self._locked_ids[track_id] = best_ocr
+            self._lock_source[track_id] = "ocr"
 
     def _fuse(self, votes: deque[TrackVote]) -> FusedTrackResult:
         score_by_text: dict[str, float] = {}
@@ -142,7 +188,9 @@ class OCRTrackFuser:
             if not vote.valid or not vote.text:
                 continue
             weight = max(0.0, float(vote.conf))
-            if vote.source == "vlm_fallback":
+            if vote.source in ("fresh", "cached"):
+                weight *= self.OCR_WEIGHT_BOOST
+            elif vote.source == "vlm_fallback":
                 weight *= self.VLM_WEIGHT_BOOST
             total_valid_weight += weight
             score_by_text[vote.text] = score_by_text.get(vote.text, 0.0) + weight
