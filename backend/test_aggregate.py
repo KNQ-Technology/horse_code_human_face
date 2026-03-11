@@ -406,6 +406,86 @@ class TestHorseQualityFilter:
         assert result[0]["horse_id"] == "H294"
 
 
+class TestRiderDedup:
+    """Same rider should not appear on multiple horses. Keep the best match."""
+
+    def test_rider_on_two_horses_weaker_horse_removed(self):
+        """鍾易禮 on J301 (190 face) and K012 (46 face).
+        J301 keeps 鍾易禮, K012 is removed entirely (likely false detection)."""
+        frames = []
+        for i in range(225):
+            frames.append(_frame(i, [
+                _det(track_id=36, conf=0.88, stable_id="J301",
+                     fused_ready=True, status="CONFIRMED", state_stable_id="J301",
+                     rider_name="鍾易禮", rider_score=0.50, rider_source="face"),
+            ]))
+        for i in range(225, 290):
+            frames.append(_frame(i, [
+                _det(track_id=17, conf=0.82, stable_id="K012",
+                     fused_ready=True, status="CONFIRMED", state_stable_id="K012",
+                     rider_name="鍾易禮", rider_score=0.47, rider_source="face"),
+            ]))
+        for i in range(290, 400):
+            frames.append(_frame(i, [
+                _det(track_id=76, conf=0.88, stable_id="K012",
+                     fused_ready=True, status="CONFIRMED", state_stable_id="K012"),
+            ]))
+        result = _aggregate_detections(frames, fps=25.0)
+        horse_ids = [r["horse_id"] for r in result]
+        assert "J301" in horse_ids
+        assert "K012" not in horse_ids
+
+    def test_different_riders_on_different_horses_both_kept(self):
+        """Two different riders on two different horses should both be kept."""
+        frames = []
+        for i in range(100):
+            frames.append(_frame(i, [
+                _det(track_id=1, conf=0.88, stable_id="J301",
+                     fused_ready=True, status="CONFIRMED", state_stable_id="J301",
+                     rider_name="鍾易禮", rider_score=0.50, rider_source="face"),
+                _det(track_id=2, conf=0.85, stable_id="K012",
+                     fused_ready=True, status="CONFIRMED", state_stable_id="K012",
+                     rider_name="潘頓", rider_score=0.60, rider_source="face"),
+            ]))
+        result = _aggregate_detections(frames, fps=25.0)
+        result_map = {r["horse_id"]: r["person_name"] for r in result}
+        assert result_map["J301"] == "鍾易禮"
+        assert result_map["K012"] == "潘頓"
+
+    def test_deduped_horse_removed_entirely(self):
+        """Horse whose rider was claimed by another horse is removed entirely."""
+        frames = []
+        for i in range(100):
+            frames.append(_frame(i, [
+                _det(track_id=1, conf=0.90, stable_id="H001",
+                     fused_ready=True, status="CONFIRMED", state_stable_id="H001",
+                     rider_name="RiderA", rider_score=0.55, rider_source="face"),
+            ]))
+        for i in range(100, 200):
+            frames.append(_frame(i, [
+                _det(track_id=2, conf=0.85, stable_id="H002",
+                     fused_ready=True, status="CONFIRMED", state_stable_id="H002",
+                     rider_name="RiderA", rider_score=0.50, rider_source="face"),
+            ]))
+        result = _aggregate_detections(frames, fps=25.0)
+        horse_ids = [r["horse_id"] for r in result]
+        assert "H001" in horse_ids
+        assert "H002" not in horse_ids
+
+    def test_horse_without_any_rider_still_kept(self):
+        """Horse that never had any rider detected should still show as 其他骑师."""
+        frames = []
+        for i in range(100):
+            frames.append(_frame(i, [
+                _det(track_id=1, conf=0.88, stable_id="D012",
+                     fused_ready=True, status="CONFIRMED", state_stable_id="D012"),
+            ]))
+        result = _aggregate_detections(frames, fps=25.0)
+        assert len(result) == 1
+        assert result[0]["horse_id"] == "D012"
+        assert result[0]["person_name"] == "其他骑师"
+
+
 class TestEndToEndWithRealPattern:
     """Test with data matching the real results.json pattern."""
 

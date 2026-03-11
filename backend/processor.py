@@ -221,20 +221,19 @@ def _aggregate_detections(
             hg["best_conf"] = ti["best_conf"]
             hg["best_frame"] = ti["best_frame"]
 
-    results = []
-    for horse_id in sorted(horse_groups.keys()):
-        hg = horse_groups[horse_id]
+    horse_rider_picks: dict[str, tuple[str, int, float]] = {}
 
+    for horse_id, hg in horse_groups.items():
         avg_conf = sum(hg["confs"]) / len(hg["confs"]) if hg["confs"] else 0.0
         if avg_conf < MIN_AVG_CONF:
             continue
-
         duration_frames = hg["last_frame"] - hg["first_frame"] + 1
         duration_sec = duration_frames / max(fps, 1.0)
         if duration_sec < MIN_DURATION_SEC:
             continue
 
         rider_name = ""
+        rider_face_cnt = 0
         rider_score = 0.0
         if hg["riders"]:
             face_count: dict[str, int] = {}
@@ -253,10 +252,29 @@ def _aggregate_detections(
                     candidates,
                     key=lambda n: (candidates[n], score_sum[n] / face_count[n]),
                 )
+                rider_face_cnt = candidates[rider_name]
                 rider_score = score_sum[rider_name] / face_count[rider_name]
 
-        person_name = rider_name if rider_name else "其他骑师"
-        conf_str = f"{hg['best_conf']:.2f}_{rider_score:.2f}"
+        horse_rider_picks[horse_id] = (rider_name, rider_face_cnt, rider_score)
+
+    claimed: dict[str, str] = {}
+    for horse_id in sorted(
+        horse_rider_picks,
+        key=lambda h: -horse_rider_picks[h][1],
+    ):
+        rname, cnt, _ = horse_rider_picks[horse_id]
+        if rname and rname not in claimed:
+            claimed[rname] = horse_id
+
+    results = []
+    for horse_id in sorted(horse_rider_picks.keys()):
+        rname, _, rscore = horse_rider_picks[horse_id]
+        if rname and claimed.get(rname) != horse_id:
+            continue
+
+        hg = horse_groups[horse_id]
+        person_name = rname if rname else "其他骑师"
+        conf_str = f"{hg['best_conf']:.2f}_{rscore:.2f}"
         timestamp = _frame_to_timestamp(hg["best_frame"], fps)
         results.append({
             "timestamp": timestamp,
