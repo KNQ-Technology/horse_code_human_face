@@ -61,6 +61,7 @@ rider_identity:
   face_models_dir: "horse_id/models"
   horse_rider_map: ""
   feature_store_path: "outputs/rider_identity.sqlite"
+  use_feature_store: false
 
 vlm_fallback:
   enabled: true

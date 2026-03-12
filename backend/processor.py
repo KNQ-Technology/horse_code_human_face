@@ -114,7 +114,7 @@ def _frame_to_timestamp(frame_idx: int, fps: float) -> str:
     return f"{mm:02d}:{ss:02d}"
 
 
-_INDEPENDENT_FACE_SOURCE = "face"
+_TRUSTED_FACE_SOURCES = {"face", "face_locked"}
 
 MIN_CONFIRMED_FRAMES = 10
 MIN_FACE_FRAMES_FOR_RIDER = 5
@@ -239,7 +239,7 @@ def _aggregate_detections(
             face_count: dict[str, int] = {}
             score_sum: dict[str, float] = {}
             for rname, rscore, rsource in hg["riders"]:
-                if rsource == _INDEPENDENT_FACE_SOURCE:
+                if rsource in _TRUSTED_FACE_SOURCES:
                     face_count[rname] = face_count.get(rname, 0) + 1
                     score_sum[rname] = score_sum.get(rname, 0.0) + rscore
 
@@ -341,6 +341,7 @@ def process_video(
             face_models_dir=ri.face_models_dir if ri else "",
             horse_rider_map_path=ri.horse_rider_map if ri else "",
             feature_store_path=ri.feature_store_path if ri else "outputs/rider_identity.sqlite",
+            use_feature_store=ri.use_feature_store if ri else True,
         )
     )
     if rider_identity.enabled:
@@ -618,10 +619,30 @@ def process_video(
 
     summary_detections = _aggregate_detections(frame_results, fps)
 
-    return {
+    result = {
         "filename": os.path.basename(video_path),
         "duration": duration_str,
         "resolution": resolution_str,
         "processed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "detections": summary_detections,
     }
+
+    output_stem = Path(output_video_path).stem
+    output_dir = Path(output_video_path).parent
+    frames_json_path = output_dir / f"{output_stem}_frames.json"
+    summary_json_path = output_dir / f"{output_stem}_summary.json"
+    try:
+        frames_json_path.write_text(
+            json.dumps(frame_results, indent=2, ensure_ascii=False, default=str),
+            encoding="utf-8",
+        )
+        summary_json_path.write_text(
+            json.dumps(result, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        print(f"[processor] saved {frames_json_path}  ({frames_json_path.stat().st_size / 1024:.0f} KB)")
+        print(f"[processor] saved {summary_json_path}")
+    except Exception as exc:
+        print(f"[processor] failed to save JSON: {exc}")
+
+    return result

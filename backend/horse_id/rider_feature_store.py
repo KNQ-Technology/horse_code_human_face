@@ -12,6 +12,8 @@ import numpy as np
 class RiderFeatureStore:
     """Persistent rider feature store for open-set identity management."""
 
+    _FACE_CORRECTION_MIN_SCORE = 0.50
+
     def __init__(self, db_path: str | Path, known_names: set[str] | None = None) -> None:
         self.db_path = str(Path(db_path).expanduser().resolve())
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
@@ -156,14 +158,28 @@ class RiderFeatureStore:
         next_face_name = face_name if face_name else str(row["face_name"] or "")
         next_face_score = max(float(row["face_score"] or 0.0), float(face_score))
         next_horse_hint = horse_hint if horse_hint else str(row["horse_hint"] or "")
+
+        cur_display = str(row["display_name"] or "")
+        if (
+            next_face_name
+            and next_face_name != cur_display
+            and next_face_score >= self._FACE_CORRECTION_MIN_SCORE
+            and self._is_known(next_face_name)
+        ):
+            next_display = next_face_name
+        else:
+            next_display = cur_display
+
         self.conn.execute(
             """
             UPDATE riders
-            SET face_name = ?, face_score = ?, color_proto_json = ?, horse_hint = ?,
+            SET display_name = ?, face_name = ?, face_score = ?,
+                color_proto_json = ?, horse_hint = ?,
                 seen_count = seen_count + 1, last_seen_ts = ?
             WHERE id = ?
             """,
             (
+                next_display,
                 next_face_name,
                 next_face_score,
                 self._to_json_color(merged_color),

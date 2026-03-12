@@ -94,6 +94,7 @@ class RiderIdentitySettingsConfig:
     face_models_dir: str = ""
     horse_rider_map: str = ""
     feature_store_path: str = "outputs/rider_identity.sqlite"
+    use_feature_store: bool = True
 
 
 @dataclass

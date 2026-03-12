@@ -14,6 +14,7 @@ _COLOR_WHITE = (255, 255, 255)
 _COLOR_RED = (80, 80, 255)
 _COLOR_MAGENTA = (255, 0, 255)
 _COLOR_FACE_BOX = (255, 128, 0)
+_COLOR_GOLD = (0, 215, 255)
 _COLOR_RIDER_MATCHED = (0, 230, 0)
 _COLOR_RIDER_UNMATCHED = (120, 120, 120)
 
@@ -157,7 +158,14 @@ class ResultVisualizer:
                 )
                 continue
 
-            cv2.rectangle(canvas, (horse_x1, horse_y1), (horse_x2, horse_y2), _COLOR_GREEN, 2)
+            if rider_matched and rider_name:
+                cv2.rectangle(canvas, (horse_x1, horse_y1), (horse_x2, horse_y2), _COLOR_GOLD, 3)
+                self._draw_corner_brackets(
+                    canvas, horse_x1 - 6, horse_y1 - 6, horse_x2 + 6, horse_y2 + 6,
+                    _COLOR_GOLD, 2,
+                )
+            else:
+                cv2.rectangle(canvas, (horse_x1, horse_y1), (horse_x2, horse_y2), _COLOR_GREEN, 2)
             cv2.rectangle(canvas, (roi.x1, roi.y1), (roi.x2, roi.y2), _COLOR_ORANGE, 2)
 
             label_main = f"H{idx} {track_label} conf={det.conf:.2f}"
@@ -242,14 +250,8 @@ class ResultVisualizer:
         rider_score: float,
     ) -> None:
         """Display mode: minimal overlay with horse number and rider name only."""
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), _COLOR_WHITE, 2)
-
         track_tag = "" if det.track_id is None else f"T{det.track_id}"
         horse_label = f"#{stable_id}" if stable_id != "--" else (track_tag or f"#{idx}")
-        fs_horse = 24
-        tw, th = _text_size_pil(horse_label, fs_horse)
-        label_x = x1
-        label_y = max(0, y1 - th - 28)
 
         show_rider = (
             rider_matched
@@ -257,26 +259,65 @@ class ResultVisualizer:
             and rider_source in ResultVisualizer._DISPLAY_TRUSTED_SOURCES
             and rider_score >= ResultVisualizer._DISPLAY_MIN_RIDER_SCORE
         )
+
         if show_rider:
-            rider_label = f"骑手: {rider_name}"
-            rider_color = (100, 255, 100)
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), _COLOR_GOLD, 3)
+            ResultVisualizer._draw_corner_brackets(
+                canvas, x1 - 6, y1 - 6, x2 + 6, y2 + 6, _COLOR_GOLD, 2,
+            )
+            rider_label = f"★ 骑手: {rider_name}"
+            rider_color = _COLOR_GOLD
+            horse_color = _COLOR_GOLD
+            label_bg = (0, 40, 70)
         else:
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), _COLOR_WHITE, 2)
             rider_label = "骑手: 其他骑师"
             rider_color = (180, 180, 180)
+            horse_color = _COLOR_WHITE
+            label_bg = (0, 0, 0)
+
+        fs_horse = 24
+        tw, th = _text_size_pil(horse_label, fs_horse)
+        label_x = x1
+        label_y = max(0, y1 - th - 28)
         fs_rider = 20
         rw, rh = _text_size_pil(rider_label, fs_rider)
         ry = label_y + th + 8
 
         overlay = canvas.copy()
         cv2.rectangle(overlay, (label_x - 4, label_y - 4),
-                      (label_x + tw + 8, label_y + th + 4), (0, 0, 0), -1)
+                      (label_x + tw + 8, label_y + th + 4), label_bg, -1)
         cv2.rectangle(overlay, (label_x - 4, ry - 2),
-                      (label_x + rw + 8, ry + rh + 2), (0, 0, 0), -1)
+                      (label_x + rw + 8, ry + rh + 2), label_bg, -1)
         cv2.addWeighted(overlay, 0.6, canvas, 0.4, 0, canvas)
 
+        if show_rider:
+            cv2.rectangle(canvas, (label_x - 4, label_y - 4),
+                          (label_x - 1, ry + rh + 2), _COLOR_GOLD, -1)
+
         with PilBatchRenderer(canvas) as pil:
-            pil.text((label_x, label_y), horse_label, fs_horse, _COLOR_WHITE)
+            pil.text((label_x, label_y), horse_label, fs_horse, horse_color)
             pil.text((label_x, ry), rider_label, fs_rider, rider_color)
+
+    @staticmethod
+    def _draw_corner_brackets(
+        canvas: np.ndarray,
+        x1: int, y1: int, x2: int, y2: int,
+        color: tuple[int, int, int],
+        thickness: int = 2,
+        ratio: float = 0.25,
+    ) -> None:
+        """Draw L-shaped corner bracket decorations around a rectangle."""
+        w, h = x2 - x1, y2 - y1
+        arm = max(8, int(min(w, h) * ratio))
+        cv2.line(canvas, (x1, y1), (x1 + arm, y1), color, thickness, cv2.LINE_AA)
+        cv2.line(canvas, (x1, y1), (x1, y1 + arm), color, thickness, cv2.LINE_AA)
+        cv2.line(canvas, (x2, y1), (x2 - arm, y1), color, thickness, cv2.LINE_AA)
+        cv2.line(canvas, (x2, y1), (x2, y1 + arm), color, thickness, cv2.LINE_AA)
+        cv2.line(canvas, (x1, y2), (x1 + arm, y2), color, thickness, cv2.LINE_AA)
+        cv2.line(canvas, (x1, y2), (x1, y2 - arm), color, thickness, cv2.LINE_AA)
+        cv2.line(canvas, (x2, y2), (x2 - arm, y2), color, thickness, cv2.LINE_AA)
+        cv2.line(canvas, (x2, y2), (x2, y2 - arm), color, thickness, cv2.LINE_AA)
 
     @staticmethod
     def _draw_face_box(
@@ -285,15 +326,35 @@ class ResultVisualizer:
         name: str,
         score: float,
     ) -> None:
-        """Draw face bounding box with name label. Unknown faces show 'someone'."""
+        """Draw face bounding box with name label. Known riders get gold highlight."""
         x1, y1, x2, y2 = bbox
+        h_img, w_img = canvas.shape[:2]
+
         if name:
-            box_color = _COLOR_FACE_BOX
-            label = f"{name} {score:.2f}"
+            glow_pad = 6
+            gx1 = max(0, x1 - glow_pad)
+            gy1 = max(0, y1 - glow_pad)
+            gx2 = min(w_img, x2 + glow_pad)
+            gy2 = min(h_img, y2 + glow_pad)
+            if gy2 > gy1 and gx2 > gx1:
+                region = canvas[gy1:gy2, gx1:gx2].copy()
+                cv2.rectangle(canvas, (gx1, gy1), (gx2, gy2), _COLOR_GOLD, -1)
+                cv2.addWeighted(
+                    canvas[gy1:gy2, gx1:gx2], 0.20, region, 0.80, 0,
+                    canvas[gy1:gy2, gx1:gx2],
+                )
+
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), _COLOR_GOLD, 3)
+            ResultVisualizer._draw_corner_brackets(
+                canvas, x1 - 5, y1 - 5, x2 + 5, y2 + 5, _COLOR_GOLD, 2,
+            )
+
+            box_color = _COLOR_GOLD
+            label = f"★ {name} {score:.2f}"
         else:
             box_color = _COLOR_YELLOW
             label = "someone"
-        cv2.rectangle(canvas, (x1, y1), (x2, y2), box_color, 2)
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), box_color, 2)
 
         fs = 18
         tw, th = _text_size_pil(label, fs)
@@ -313,10 +374,11 @@ class ResultVisualizer:
         face_detected: bool = False,
     ) -> None:
         """Draw rider identity tag with source-dependent color and background."""
-        if matched and name:
-            display = f"Rider: {name} ({score:.2f}) [{source}]"
-            fg_color = _COLOR_RIDER_MATCHED
-            bg_color = (20, 60, 20)
+        is_known = matched and bool(name)
+        if is_known:
+            display = f"★ Rider: {name} ({score:.2f}) [{source}]"
+            fg_color = _COLOR_GOLD
+            bg_color = (0, 40, 70)
         elif face_detected:
             display = "Rider: someone"
             fg_color = _COLOR_YELLOW
@@ -329,6 +391,8 @@ class ResultVisualizer:
         fs = 19
         tw, th = _text_size_pil(display, fs)
         cv2.rectangle(canvas, (x - 2, y - 2), (x + tw + 4, y + th + 2), bg_color, -1)
+        if is_known:
+            cv2.rectangle(canvas, (x - 2, y - 2), (x + 1, y + th + 2), _COLOR_GOLD, -1)
         _put_text_pil(canvas, display, (x, y), fs, fg_color)
 
     def _draw_ocr_summary(self, canvas: np.ndarray, ocr_infos: list[dict[str, object]]) -> None:

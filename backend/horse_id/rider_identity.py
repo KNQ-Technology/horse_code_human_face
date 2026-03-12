@@ -36,6 +36,7 @@ class RiderIdentityConfig:
     face_lock_max_hold: int = 90
     face_lock_challenge: int = 5
     face_interval: int = 3
+    use_feature_store: bool = True
 
 
 @dataclass
@@ -226,11 +227,17 @@ class RiderIdentityModule:
 
     def __init__(self, config: RiderIdentityConfig) -> None:
         self.config = config
+        self._use_feature_store = config.use_feature_store
         self._face_backend: _FaceIdentityBackend | None = None
         self._track_states: dict[int, _TrackIdentityState] = {}
         self._name_color_proto: dict[str, np.ndarray] = {}
         self._track_rider_cache: dict[int, str] = {}
-        self._horse_to_riders, self._rider_to_horse = self._load_horse_rider_relations(config.horse_rider_map_path)
+
+        if self._use_feature_store:
+            self._horse_to_riders, self._rider_to_horse = self._load_horse_rider_relations(config.horse_rider_map_path)
+        else:
+            self._horse_to_riders, self._rider_to_horse = {}, {}
+
         self._frame_faces: list[dict[str, Any]] = []
         self._frame_used_face_indices: set[int] = set()
         self._frame: np.ndarray | None = None
@@ -255,12 +262,18 @@ class RiderIdentityModule:
         self._known_face_names: set[str] = set()
         if self._face_backend is not None:
             self._known_face_names = self._face_backend.get_all_known_names()
-        self._feature_store = RiderFeatureStore(config.feature_store_path, known_names=self._known_face_names)
+
+        if self._use_feature_store:
+            self._feature_store = RiderFeatureStore(config.feature_store_path, known_names=self._known_face_names)
+        else:
+            self._feature_store = None  # type: ignore[assignment]
 
         self._face_frame_counter: int = 0
         self._cached_frame_faces: list[dict[str, Any]] = []
 
         self._enabled = self._face_backend is not None or bool(self._horse_to_riders)
+        if not self._use_feature_store:
+            print("[rider_identity] feature_store & horse_rider_map DISABLED by config")
 
     @property
     def enabled(self) -> bool:
@@ -486,7 +499,7 @@ class RiderIdentityModule:
         if ocr_fused_payload:
             if bool(ocr_fused_payload.get("ready", False)):
                 horse_id = str(ocr_fused_payload.get("stable_id", "")).strip()
-            if horse_id:
+            if horse_id and self._use_feature_store:
                 horse_rider_names = sorted(self._allowed_riders_by_horse(horse_id))
 
         allowed_names = set(horse_rider_names)
@@ -652,33 +665,40 @@ class RiderIdentityModule:
                 face_is_locked = False
                 face_lock_name_out = ""
 
-        store_identity = self._feature_store.observe(
-            face_name=best_name if matched else (face_hit.get("name", "") if face_hit else ""),
-            face_score=best_score if matched else face_score,
-            color_feat=color_for_store,
-            horse_hint=horse_id,
-            horse_map_name=horse_rider_names[0] if len(horse_rider_names) == 1 else "",
-            cached_rider_code=cached_code,
-            color_match_threshold=self.config.min_color_similarity,
-            allowed_display_names=sorted(allowed_names),
-        )
-        final_name = str(store_identity.get("display_name", "")) or str(store_identity.get("rider_code", ""))
-        final_code = str(store_identity.get("rider_code", ""))
-        final_status = str(store_identity.get("status", "unknown"))
-        final_match_type = str(store_identity.get("match_type", "none"))
+        if self._use_feature_store and self._feature_store is not None:
+            store_identity = self._feature_store.observe(
+                face_name=best_name if matched else (face_hit.get("name", "") if face_hit else ""),
+                face_score=best_score if matched else face_score,
+                color_feat=color_for_store,
+                horse_hint=horse_id,
+                horse_map_name=horse_rider_names[0] if len(horse_rider_names) == 1 else "",
+                cached_rider_code=cached_code,
+                color_match_threshold=self.config.min_color_similarity,
+                allowed_display_names=sorted(allowed_names),
+            )
+            final_name = str(store_identity.get("display_name", "")) or str(store_identity.get("rider_code", ""))
+            final_code = str(store_identity.get("rider_code", ""))
+            final_status = str(store_identity.get("status", "unknown"))
+            final_match_type = str(store_identity.get("match_type", "none"))
+        else:
+            store_identity = {}
+            final_name = best_name if matched else ""
+            final_code = ""
+            final_status = "known" if matched else "unknown"
+            final_match_type = source if matched else "none"
 
-        if not final_name and face_is_locked and face_lock_name_out:
+        if face_is_locked and face_lock_name_out and face_lock_name_out != final_name:
             final_name = face_lock_name_out
             final_status = "known"
             final_match_type = "face_lock"
             if not matched:
                 matched = True
-                source = "face_locked"
                 best_score = (
                     state.locked_score
                     if track_id is not None
                     else best_score
                 )
+            source = "face_locked"
 
         if track_id is not None and final_code:
             self._track_rider_cache[int(track_id)] = final_code
@@ -689,7 +709,7 @@ class RiderIdentityModule:
             "name": final_name,
             "score": float(best_score if matched else face_score),
             "matched": bool(final_name),
-            "source": source if matched else "store",
+            "source": source if matched else ("store" if self._use_feature_store else "none"),
             "rider_code": final_code,
             "rider_status": final_status,
             "store_match_type": final_match_type,

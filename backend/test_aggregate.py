@@ -182,10 +182,11 @@ class TestMultipleRidersPerHorse:
         result = _aggregate_detections(frames, fps=25.0)
         assert result[0]["person_name"] == "鍾易禮"
 
-    def test_face_locked_not_counted_as_independent_evidence(self):
-        """face_locked is cached result, not independent face comparison.
-        蔡明紹 has 38 face + 48 face_locked = 86 total, but only 38 independent.
-        鍾易禮 has 46 face (all independent). 鍾易禮 should win."""
+    def test_face_locked_counted_as_trusted_evidence(self):
+        """face_locked represents a validated identity lock (requires consecutive
+        face detections to activate), so it counts as trusted evidence.
+        蔡明紹 has 38 face + 48 face_locked = 86 trusted frames.
+        鍾易禮 has 46 face. 蔡明紹 should win with more total evidence."""
         frames = []
         # 鍾易禮: 46 face frames on K012
         for i in range(46):
@@ -194,7 +195,7 @@ class TestMultipleRidersPerHorse:
                      fused_ready=True, status="CONFIRMED", state_stable_id="K012",
                      rider_name="鍾易禮", rider_score=0.47, rider_source="face"),
             ]))
-        # 蔡明紹: 38 face + 48 face_locked (should only count 38)
+        # 蔡明紹: 38 face + 48 face_locked = 86 total trusted
         for i in range(46, 84):
             frames.append(_frame(i, [
                 _det(track_id=76, conf=0.87, stable_id="K012",
@@ -209,7 +210,7 @@ class TestMultipleRidersPerHorse:
             ]))
         result = _aggregate_detections(frames, fps=25.0)
         assert len(result) == 1
-        assert result[0]["person_name"] == "鍾易禮"
+        assert result[0]["person_name"] == "蔡明紹"
 
     def test_tie_broken_by_avg_score(self):
         """When two riders have same face frame count, higher avg score wins."""
