@@ -12,8 +12,7 @@ from processor import process_video
 
 app = FastAPI()
 
-BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-VIDEOS_DIR = os.path.join(BASE_DIR, "videos")
+VIDEOS_DIR = "/mnt/nas/【赛马会识别】/temp"
 UPLOAD_DIR = os.path.join(VIDEOS_DIR, "upload")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
