@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pytest
-from eval_runner import compute_set_metrics, evaluate_single_video
+from eval_runner import compute_set_metrics, evaluate_single_video, aggregate_metrics
 
 
 class TestComputeSetMetrics:
@@ -116,3 +116,48 @@ class TestEvaluateSingleVideo:
         result = evaluate_single_video(gt_entries, pred_entries)
         assert result["rider"]["precision"] == 1.0
         assert result["rider"]["recall"] == 1.0
+
+
+class TestAggregateMetrics:
+    """Test macro/micro averaging and exact match rate."""
+
+    def test_two_perfect_videos(self):
+        per_video = [
+            {
+                "video_file": "v1.mp4",
+                "horse_id": {"precision": 1.0, "recall": 1.0, "f1": 1.0, "tp": 2, "fp": 0, "fn": 0},
+                "rider":    {"precision": 1.0, "recall": 1.0, "f1": 1.0, "tp": 2, "fp": 0, "fn": 0},
+                "pair":     {"precision": 1.0, "recall": 1.0, "f1": 1.0, "tp": 2, "fp": 0, "fn": 0},
+            },
+            {
+                "video_file": "v2.mp4",
+                "horse_id": {"precision": 1.0, "recall": 1.0, "f1": 1.0, "tp": 3, "fp": 0, "fn": 0},
+                "rider":    {"precision": 1.0, "recall": 1.0, "f1": 1.0, "tp": 3, "fp": 0, "fn": 0},
+                "pair":     {"precision": 1.0, "recall": 1.0, "f1": 1.0, "tp": 3, "fp": 0, "fn": 0},
+            },
+        ]
+        agg = aggregate_metrics(per_video)
+        assert agg["exact_match_rate"] == 1.0
+        for dim in ("horse_id", "rider", "pair"):
+            assert agg[dim]["macro"]["f1"] == 1.0
+            assert agg[dim]["micro"]["f1"] == 1.0
+
+    def test_one_perfect_one_bad(self):
+        per_video = [
+            {
+                "video_file": "v1.mp4",
+                "horse_id": {"precision": 1.0, "recall": 1.0, "f1": 1.0, "tp": 2, "fp": 0, "fn": 0},
+                "rider":    {"precision": 1.0, "recall": 1.0, "f1": 1.0, "tp": 2, "fp": 0, "fn": 0},
+                "pair":     {"precision": 1.0, "recall": 1.0, "f1": 1.0, "tp": 2, "fp": 0, "fn": 0},
+            },
+            {
+                "video_file": "v2.mp4",
+                "horse_id": {"precision": 0.0, "recall": 0.0, "f1": 0.0, "tp": 0, "fp": 2, "fn": 1},
+                "rider":    {"precision": 0.0, "recall": 0.0, "f1": 0.0, "tp": 0, "fp": 2, "fn": 1},
+                "pair":     {"precision": 0.0, "recall": 0.0, "f1": 0.0, "tp": 0, "fp": 2, "fn": 1},
+            },
+        ]
+        agg = aggregate_metrics(per_video)
+        assert agg["exact_match_rate"] == 0.5
+        for dim in ("horse_id", "rider", "pair"):
+            assert agg[dim]["macro"]["f1"] == pytest.approx(0.5)
