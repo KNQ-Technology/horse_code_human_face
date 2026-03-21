@@ -1,0 +1,22 @@
+{
+  "version": "1.0",
+  "annotator": "",
+  "created_at": "",
+  "videos": [
+    {
+      "video_file": "example_race.mp4",
+      "race_info": {
+        "date": "2026-01-01",
+        "race_number": 1,
+        "venue": ""
+      },
+      "ground_truth": [
+        {
+          "horse_id": "B123",
+          "rider_name": "骑手姓名（须与人脸库注册名一致）",
+          "notes": ""
+        }
+      ]
+    }
+  ]
+}
