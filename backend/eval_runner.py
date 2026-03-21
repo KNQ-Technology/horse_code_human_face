@@ -3,6 +3,8 @@
 """
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import Any
 
 
@@ -158,3 +160,23 @@ def classify_errors(
             })
 
     return errors
+
+
+def load_ground_truth(gt_path: Path) -> dict[str, list[dict[str, str]]]:
+    """
+    @param gt_path ground_truth.json 文件路径
+    @return {video_file: [gt_entries]} 的映射
+    """
+    data = json.loads(gt_path.read_text(encoding="utf-8"))
+    return {
+        v["video_file"]: v["ground_truth"]
+        for v in data["videos"]
+    }
+
+
+def load_summary(summary_path: Path) -> dict[str, Any]:
+    """
+    @param summary_path _summary.json 文件路径
+    @return 解析后的 summary 字典
+    """
+    return json.loads(summary_path.read_text(encoding="utf-8"))

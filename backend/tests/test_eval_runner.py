@@ -1,8 +1,14 @@
 """Tests for eval_runner module."""
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
-from eval_runner import compute_set_metrics, evaluate_single_video, aggregate_metrics, classify_errors
+from eval_runner import (
+    compute_set_metrics, evaluate_single_video, aggregate_metrics,
+    classify_errors, load_ground_truth, load_summary,
+)
 
 
 class TestComputeSetMetrics:
@@ -210,3 +216,38 @@ class TestClassifyErrors:
         ]
         errors = classify_errors(gt, pred)
         assert any(e["type"] == "FP-Rider" and e["rider_name"] == "何泽尧" for e in errors)
+
+
+class TestLoadFiles:
+    """Test loading ground truth and summary JSON files."""
+
+    def test_load_ground_truth(self, tmp_path):
+        gt_data = {
+            "version": "1.0",
+            "videos": [
+                {
+                    "video_file": "race1.mp4",
+                    "ground_truth": [
+                        {"horse_id": "B123", "rider_name": "潘顿", "notes": ""}
+                    ],
+                }
+            ],
+        }
+        gt_path = tmp_path / "ground_truth.json"
+        gt_path.write_text(json.dumps(gt_data, ensure_ascii=False), encoding="utf-8")
+        result = load_ground_truth(gt_path)
+        assert "race1.mp4" in result
+        assert result["race1.mp4"][0]["horse_id"] == "B123"
+
+    def test_load_summary(self, tmp_path):
+        summary_data = {
+            "filename": "race1.mp4",
+            "detections": [
+                {"horse_id": "B123", "person_name": "潘顿", "confidence": "0.85", "timestamp": "00:05"},
+            ],
+        }
+        summary_path = tmp_path / "processed_race1_summary.json"
+        summary_path.write_text(json.dumps(summary_data, ensure_ascii=False), encoding="utf-8")
+        result = load_summary(summary_path)
+        assert result["filename"] == "race1.mp4"
+        assert len(result["detections"]) == 1
