@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pytest
-from eval_runner import compute_set_metrics, evaluate_single_video, aggregate_metrics
+from eval_runner import compute_set_metrics, evaluate_single_video, aggregate_metrics, classify_errors
 
 
 class TestComputeSetMetrics:
@@ -161,3 +161,52 @@ class TestAggregateMetrics:
         assert agg["exact_match_rate"] == 0.5
         for dim in ("horse_id", "rider", "pair"):
             assert agg[dim]["macro"]["f1"] == pytest.approx(0.5)
+
+
+class TestClassifyErrors:
+    """Test error attribution for a single video."""
+
+    def test_no_errors(self):
+        gt = [{"horse_id": "B123", "rider_name": "潘顿"}]
+        pred = [{"horse_id": "B123", "person_name": "潘顿"}]
+        errors = classify_errors(gt, pred)
+        assert len(errors) == 0
+
+    def test_miss_horse(self):
+        gt = [{"horse_id": "B123", "rider_name": "潘顿"}]
+        pred = []
+        errors = classify_errors(gt, pred)
+        assert any(e["type"] == "Miss-Horse" and e["horse_id"] == "B123" for e in errors)
+
+    def test_fp_horse(self):
+        gt = []
+        pred = [{"horse_id": "C999", "person_name": "何泽尧"}]
+        errors = classify_errors(gt, pred)
+        assert any(e["type"] == "FP-Horse" and e["horse_id"] == "C999" for e in errors)
+
+    def test_miss_rider(self):
+        gt = [{"horse_id": "B123", "rider_name": "潘顿"}]
+        pred = [{"horse_id": "B123", "person_name": "其他骑师"}]
+        errors = classify_errors(gt, pred)
+        assert any(e["type"] == "Miss-Rider" and e["rider_name"] == "潘顿" for e in errors)
+
+    def test_wrong_pair(self):
+        gt = [
+            {"horse_id": "B123", "rider_name": "潘顿"},
+            {"horse_id": "A045", "rider_name": "莫雷拉"},
+        ]
+        pred = [
+            {"horse_id": "B123", "person_name": "莫雷拉"},
+            {"horse_id": "A045", "person_name": "潘顿"},
+        ]
+        errors = classify_errors(gt, pred)
+        assert any(e["type"] == "Wrong-Pair" for e in errors)
+
+    def test_fp_rider(self):
+        gt = [{"horse_id": "B123", "rider_name": "潘顿"}]
+        pred = [
+            {"horse_id": "B123", "person_name": "潘顿"},
+            {"horse_id": "C999", "person_name": "何泽尧"},
+        ]
+        errors = classify_errors(gt, pred)
+        assert any(e["type"] == "FP-Rider" and e["rider_name"] == "何泽尧" for e in errors)

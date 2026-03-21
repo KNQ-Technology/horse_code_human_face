@@ -90,3 +90,71 @@ def aggregate_metrics(per_video: list[dict[str, Any]]) -> dict[str, Any]:
         }
 
     return result
+
+
+def classify_errors(
+    gt_entries: list[dict[str, str]],
+    pred_entries: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    """
+    @param gt_entries Ground Truth 列表
+    @param pred_entries 系统预测列表
+    @return 错误列表，每项含 type, horse_id, rider_name, detail
+    """
+    errors: list[dict[str, str]] = []
+
+    gt_horses = {e["horse_id"] for e in gt_entries}
+    pred_horses = {e["horse_id"] for e in pred_entries}
+
+    gt_riders = {e["rider_name"] for e in gt_entries if e["rider_name"] != PLACEHOLDER_RIDER}
+    pred_riders = {e.get("person_name", PLACEHOLDER_RIDER) for e in pred_entries
+                   if e.get("person_name") != PLACEHOLDER_RIDER}
+
+    gt_pair_map = {e["horse_id"]: e["rider_name"] for e in gt_entries}
+    pred_pair_map = {e["horse_id"]: e.get("person_name", PLACEHOLDER_RIDER) for e in pred_entries}
+
+    for h in gt_horses - pred_horses:
+        errors.append({
+            "type": "Miss-Horse",
+            "horse_id": h,
+            "rider_name": gt_pair_map.get(h, ""),
+            "detail": f"GT 中的马号 {h} 未被系统检出",
+        })
+
+    for h in pred_horses - gt_horses:
+        errors.append({
+            "type": "FP-Horse",
+            "horse_id": h,
+            "rider_name": pred_pair_map.get(h, ""),
+            "detail": f"系统误检了马号 {h}",
+        })
+
+    for r in gt_riders - pred_riders:
+        errors.append({
+            "type": "Miss-Rider",
+            "horse_id": "",
+            "rider_name": r,
+            "detail": f"GT 中的骑手 {r} 未被系统识别",
+        })
+
+    for r in pred_riders - gt_riders:
+        errors.append({
+            "type": "FP-Rider",
+            "horse_id": "",
+            "rider_name": r,
+            "detail": f"系统误检了骑手 {r}",
+        })
+
+    matched_horses = gt_horses & pred_horses
+    for h in matched_horses:
+        gt_r = gt_pair_map.get(h, PLACEHOLDER_RIDER)
+        pred_r = pred_pair_map.get(h, PLACEHOLDER_RIDER)
+        if gt_r != pred_r and gt_r != PLACEHOLDER_RIDER:
+            errors.append({
+                "type": "Wrong-Pair",
+                "horse_id": h,
+                "rider_name": f"GT={gt_r}, Pred={pred_r}",
+                "detail": f"马号 {h} 的骑手配对错误：应为 {gt_r}，实为 {pred_r}",
+            })
+
+    return errors
