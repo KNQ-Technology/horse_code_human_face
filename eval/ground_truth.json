@@ -1,0 +1,153 @@
+{
+  "version": "1.0",
+  "annotator": "视频-人脸.xlsx",
+  "created_at": "2026-03-22 00:17:29",
+  "videos": [
+    {
+      "video_file": "MVI_0014-H303.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "H303",
+          "rider_name": "班德禮",
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "video_file": "MVI_0014-L062.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "L062",
+          "rider_name": "艾道拿",
+          "notes": ""
+        }
+      ]
+    },
+    {
+      "video_file": "MVI_0014-L235.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "L235",
+          "rider_name": "巫顯東",
+          "notes": "非知名騎手多"
+        }
+      ]
+    },
+    {
+      "video_file": "MVI_0015-L274.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "L274",
+          "rider_name": "艾道拿",
+          "notes": "有人牽馬"
+        }
+      ]
+    },
+    {
+      "video_file": "MVI_0016_K487+J139_田泰安+班德禮.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "K487",
+          "rider_name": "田泰安",
+          "notes": ""
+        },
+        {
+          "horse_id": "J139",
+          "rider_name": "班德禮",
+          "notes": ""
+        }
+      ],
+      "sheet_notes": "有L074未知騎手"
+    },
+    {
+      "video_file": "MVI_0016_L023_班德禮.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "L023",
+          "rider_name": "班德禮",
+          "notes": "人多，号码布部分遮挡"
+        }
+      ]
+    },
+    {
+      "video_file": "MVI_0016-K487.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "K487",
+          "rider_name": "田泰安",
+          "notes": "同MVI_0016_K487+J139_田泰安+班德禮.mp4"
+        }
+      ]
+    },
+    {
+      "video_file": "MVI_0017_J301_鍾易禮.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "J301",
+          "rider_name": "鍾易禮",
+          "notes": "人多，有對向騎手"
+        }
+      ]
+    },
+    {
+      "video_file": "MVI_0017-J301.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "J301",
+          "rider_name": "鍾易禮",
+          "notes": "同MVI_0017_J301_鍾易禮.mp4"
+        }
+      ]
+    },
+    {
+      "video_file": "MVI_6846_L161_艾道拿.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "L161",
+          "rider_name": "艾道拿",
+          "notes": "視角不對，勿用"
+        }
+      ]
+    },
+    {
+      "video_file": "MVI_6853_J301_鍾易禮.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "J301",
+          "rider_name": "鍾易禮",
+          "notes": "人多，身後有號碼相近的人"
+        }
+      ]
+    },
+    {
+      "video_file": "MVI_6853_J357_麥文堅.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "J357",
+          "rider_name": "麥文堅",
+          "notes": "人多，號碼布遮擋"
+        }
+      ]
+    },
+    {
+      "video_file": "MVI_6853_K507_田泰安.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "K507",
+          "rider_name": "田泰安",
+          "notes": "墨鏡，有對向人"
+        }
+      ]
+    },
+    {
+      "video_file": "MVI_6853_L188_潘明輝.mp4",
+      "ground_truth": [
+        {
+          "horse_id": "L188",
+          "rider_name": "潘明輝",
+          "notes": "號碼布遮擋"
+        }
+      ]
+    }
+  ]
+}

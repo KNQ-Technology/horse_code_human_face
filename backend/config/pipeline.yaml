@@ -53,7 +53,7 @@ runtime:
   direction_min_displacement: 30.0
 
 rider_identity:
-  face_db_uri: "/home/hshan/Hor-Peo_detect/rider.db"
+  face_db_uri: "/home/hshan/Hor-Peo_detect/rider_old.db"
   face_collection: "rider_faces"
   face_dim: 512
   face_min_score: 0.3
