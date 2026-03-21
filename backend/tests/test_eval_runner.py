@@ -8,6 +8,7 @@ import pytest
 from eval_runner import (
     compute_set_metrics, evaluate_single_video, aggregate_metrics,
     classify_errors, load_ground_truth, load_summary,
+    generate_markdown_report,
 )
 
 
@@ -251,3 +252,46 @@ class TestLoadFiles:
         result = load_summary(summary_path)
         assert result["filename"] == "race1.mp4"
         assert len(result["detections"]) == 1
+
+
+class TestGenerateMarkdownReport:
+    """Test markdown report generation."""
+
+    def test_report_contains_summary_table(self):
+        agg = {
+            "exact_match_rate": 0.5,
+            "horse_id": {
+                "macro": {"precision": 0.9, "recall": 0.8, "f1": 0.85},
+                "micro": {"precision": 0.88, "recall": 0.82, "f1": 0.85},
+            },
+            "rider": {
+                "macro": {"precision": 0.7, "recall": 0.6, "f1": 0.65},
+                "micro": {"precision": 0.72, "recall": 0.63, "f1": 0.67},
+            },
+            "pair": {
+                "macro": {"precision": 0.6, "recall": 0.5, "f1": 0.55},
+                "micro": {"precision": 0.62, "recall": 0.53, "f1": 0.57},
+            },
+        }
+        per_video = []
+        all_errors = []
+        md = generate_markdown_report(agg, per_video, all_errors)
+        assert "# 评测报告" in md
+        assert "完全匹配率" in md
+        assert "50.0%" in md
+
+    def test_report_contains_error_section(self):
+        agg = {
+            "exact_match_rate": 0.0,
+            "horse_id": {"macro": {"precision": 0, "recall": 0, "f1": 0}, "micro": {"precision": 0, "recall": 0, "f1": 0}},
+            "rider": {"macro": {"precision": 0, "recall": 0, "f1": 0}, "micro": {"precision": 0, "recall": 0, "f1": 0}},
+            "pair": {"macro": {"precision": 0, "recall": 0, "f1": 0}, "micro": {"precision": 0, "recall": 0, "f1": 0}},
+        }
+        all_errors = [
+            {"video_file": "v1.mp4", "type": "Miss-Horse", "horse_id": "B123", "rider_name": "潘顿", "detail": "..."},
+            {"video_file": "v1.mp4", "type": "Miss-Horse", "horse_id": "A045", "rider_name": "莫雷拉", "detail": "..."},
+            {"video_file": "v1.mp4", "type": "FP-Rider", "horse_id": "", "rider_name": "何泽尧", "detail": "..."},
+        ]
+        md = generate_markdown_report(agg, [], all_errors)
+        assert "错误归因统计" in md
+        assert "Miss-Horse" in md

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import json
+import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -180,3 +182,92 @@ def load_summary(summary_path: Path) -> dict[str, Any]:
     @return 解析后的 summary 字典
     """
     return json.loads(summary_path.read_text(encoding="utf-8"))
+
+
+def generate_markdown_report(
+    agg: dict[str, Any],
+    per_video: list[dict[str, Any]],
+    all_errors: list[dict[str, str]],
+) -> str:
+    """
+    @param agg 汇总指标
+    @param per_video 每个视频的三维度指标
+    @param all_errors 所有错误列表
+    @return Markdown 格式的评测报告
+    """
+    lines: list[str] = []
+    lines.append(f"# 评测报告\n")
+    lines.append(f"> 生成时间：{time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+
+    lines.append("## 1. 总览\n")
+    lines.append(f"- **完全匹配率：** {agg['exact_match_rate'] * 100:.1f}%")
+    lines.append(f"- **评测视频数：** {len(per_video)}\n")
+
+    lines.append("| 维度 | 宏平均 P | 宏平均 R | 宏平均 F1 | 微平均 P | 微平均 R | 微平均 F1 |")
+    lines.append("|------|----------|----------|-----------|----------|----------|-----------|")
+    for dim, label in [("horse_id", "马号"), ("rider", "骑手"), ("pair", "配对")]:
+        ma = agg[dim]["macro"]
+        mi = agg[dim]["micro"]
+        lines.append(
+            f"| {label} "
+            f"| {ma['precision']:.1%} | {ma['recall']:.1%} | {ma['f1']:.1%} "
+            f"| {mi['precision']:.1%} | {mi['recall']:.1%} | {mi['f1']:.1%} |"
+        )
+    lines.append("")
+
+    if per_video:
+        lines.append("## 2. 逐视频明细（按配对 F1 升序）\n")
+        sorted_videos = sorted(per_video, key=lambda v: v["pair"]["f1"])
+        lines.append("| 视频 | 马号 F1 | 骑手 F1 | 配对 F1 |")
+        lines.append("|------|---------|---------|---------|")
+        for v in sorted_videos:
+            lines.append(
+                f"| {v['video_file']} "
+                f"| {v['horse_id']['f1']:.1%} "
+                f"| {v['rider']['f1']:.1%} "
+                f"| {v['pair']['f1']:.1%} |"
+            )
+        lines.append("")
+
+    if all_errors:
+        lines.append("## 3. 错误归因统计\n")
+        error_counts = Counter(e["type"] for e in all_errors)
+        total_errors = len(all_errors)
+        lines.append("| 错误类型 | 数量 | 占比 |")
+        lines.append("|----------|------|------|")
+        for etype, count in error_counts.most_common():
+            lines.append(f"| {etype} | {count} | {count / total_errors:.1%} |")
+        lines.append("")
+
+        lines.append("## 4. 错误详情\n")
+        lines.append("| 视频 | 错误类型 | 马号 | 骑手 | 详情 |")
+        lines.append("|------|----------|------|------|------|")
+        for e in all_errors:
+            lines.append(
+                f"| {e['video_file']} | {e['type']} "
+                f"| {e.get('horse_id', '')} | {e.get('rider_name', '')} "
+                f"| {e.get('detail', '')} |"
+            )
+        lines.append("")
+
+        lines.append("## 5. 优化建议\n")
+        if error_counts:
+            top_error = error_counts.most_common(1)[0]
+            module_map = {
+                "Miss-Horse": "马匹检测/追踪/OCR",
+                "FP-Horse": "OCR 误读/追踪漂移",
+                "Wrong-Horse": "OCR 字符识别",
+                "Miss-Rider": "人脸检测/识别",
+                "FP-Rider": "人脸匹配阈值",
+                "Wrong-Pair": "追踪 ID 与人脸分配",
+            }
+            suggestion = module_map.get(top_error[0], "未知模块")
+            lines.append(
+                f"最高频错误为 **{top_error[0]}**（{top_error[1]} 次，占 {top_error[1] / total_errors:.1%}），"
+                f"建议优先优化 **{suggestion}** 模块。"
+            )
+    else:
+        lines.append("## 3. 错误归因统计\n")
+        lines.append("无错误，全部匹配正确。\n")
+
+    return "\n".join(lines)
