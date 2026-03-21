@@ -271,3 +271,80 @@ def generate_markdown_report(
         lines.append("无错误，全部匹配正确。\n")
 
     return "\n".join(lines)
+
+
+def run_evaluation(eval_dir: Path) -> dict[str, Any]:
+    """
+    @param eval_dir eval/ 目录路径
+    @return 完整评测结果字典
+    """
+    gt_path = eval_dir / "ground_truth.json"
+    results_dir = eval_dir / "results"
+    reports_dir = eval_dir / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+
+    gt_map = load_ground_truth(gt_path)
+
+    summary_files = sorted(results_dir.glob("*_summary.json"))
+    filename_to_summary: dict[str, list[dict]] = {}
+    for sf in summary_files:
+        s = load_summary(sf)
+        filename_to_summary[s["filename"]] = s["detections"]
+
+    per_video: list[dict[str, Any]] = []
+    all_errors: list[dict[str, str]] = []
+
+    for video_file, gt_entries in gt_map.items():
+        pred_entries = filename_to_summary.get(video_file, [])
+        metrics = evaluate_single_video(gt_entries, pred_entries)
+        metrics["video_file"] = video_file
+        per_video.append(metrics)
+
+        errors = classify_errors(gt_entries, pred_entries)
+        for e in errors:
+            e["video_file"] = video_file
+        all_errors.extend(errors)
+
+    agg = aggregate_metrics(per_video)
+
+    date_str = time.strftime("%Y-%m-%d")
+
+    report_json = {
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "summary": agg,
+        "per_video": per_video,
+        "errors": all_errors,
+    }
+    json_path = reports_dir / f"eval_report_{date_str}.json"
+    json_path.write_text(
+        json.dumps(report_json, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
+
+    md_content = generate_markdown_report(agg, per_video, all_errors)
+    md_path = reports_dir / f"eval_report_{date_str}.md"
+    md_path.write_text(md_content, encoding="utf-8")
+
+    print(f"[eval] JSON 报告: {json_path}")
+    print(f"[eval] Markdown 报告: {md_path}")
+    print(f"[eval] 完全匹配率: {agg.get('exact_match_rate', 0) * 100:.1f}%")
+
+    return report_json
+
+
+def main():
+    """CLI 入口。"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="赛马识别系统端到端评测工具")
+    parser.add_argument(
+        "--eval-dir",
+        type=Path,
+        default=Path(__file__).resolve().parent.parent / "eval",
+        help="eval/ 目录路径（默认: 项目根目录/eval/）",
+    )
+    args = parser.parse_args()
+    run_evaluation(args.eval_dir)
+
+
+if __name__ == "__main__":
+    main()
