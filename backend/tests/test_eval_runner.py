@@ -8,7 +8,7 @@ import pytest
 from eval_runner import (
     compute_set_metrics, evaluate_single_video, aggregate_metrics,
     classify_errors, load_ground_truth, load_summary,
-    generate_markdown_report,
+    generate_markdown_report, run_evaluation,
 )
 
 
@@ -295,3 +295,69 @@ class TestGenerateMarkdownReport:
         md = generate_markdown_report(agg, [], all_errors)
         assert "错误归因统计" in md
         assert "Miss-Horse" in md
+
+
+class TestIntegration:
+    """End-to-end integration test with sample data."""
+
+    def test_full_pipeline(self, tmp_path):
+        eval_dir = tmp_path / "eval"
+        (eval_dir / "results").mkdir(parents=True)
+        (eval_dir / "reports").mkdir(parents=True)
+
+        gt = {
+            "version": "1.0",
+            "videos": [
+                {
+                    "video_file": "race1.mp4",
+                    "ground_truth": [
+                        {"horse_id": "B123", "rider_name": "潘顿", "notes": ""},
+                        {"horse_id": "A045", "rider_name": "莫雷拉", "notes": ""},
+                    ],
+                },
+                {
+                    "video_file": "race2.mp4",
+                    "ground_truth": [
+                        {"horse_id": "C789", "rider_name": "何泽尧", "notes": ""},
+                    ],
+                },
+            ],
+        }
+        (eval_dir / "ground_truth.json").write_text(
+            json.dumps(gt, ensure_ascii=False), encoding="utf-8"
+        )
+
+        s1 = {
+            "filename": "race1.mp4",
+            "detections": [
+                {"horse_id": "B123", "person_name": "潘顿", "confidence": "0.9", "timestamp": "00:05"},
+                {"horse_id": "A045", "person_name": "莫雷拉", "confidence": "0.8", "timestamp": "00:10"},
+            ],
+        }
+        (eval_dir / "results" / "processed_race1_summary.json").write_text(
+            json.dumps(s1, ensure_ascii=False), encoding="utf-8"
+        )
+
+        s2 = {
+            "filename": "race2.mp4",
+            "detections": [
+                {"horse_id": "C789", "person_name": "其他骑师", "confidence": "0.7", "timestamp": "00:03"},
+            ],
+        }
+        (eval_dir / "results" / "processed_race2_summary.json").write_text(
+            json.dumps(s2, ensure_ascii=False), encoding="utf-8"
+        )
+
+        report = run_evaluation(eval_dir)
+
+        assert report["summary"]["exact_match_rate"] == 0.5
+        assert len(report["per_video"]) == 2
+
+        race1 = next(v for v in report["per_video"] if v["video_file"] == "race1.mp4")
+        assert race1["pair"]["f1"] == 1.0
+
+        race2_errors = [e for e in report["errors"] if e["video_file"] == "race2.mp4"]
+        assert any(e["type"] == "Miss-Rider" for e in race2_errors)
+
+        assert list((eval_dir / "reports").glob("eval_report_*.md"))
+        assert list((eval_dir / "reports").glob("eval_report_*.json"))
