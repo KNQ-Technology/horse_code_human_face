@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import pytest
-from eval_runner import compute_set_metrics
+from eval_runner import compute_set_metrics, evaluate_single_video
 
 
 class TestComputeSetMetrics:
@@ -59,3 +59,60 @@ class TestComputeSetMetrics:
         assert m["fp"] == 2
         assert m["fn"] == 2
         assert m["f1"] == 0.0
+
+
+class TestEvaluateSingleVideo:
+    """Test three-dimensional evaluation for a single video."""
+
+    def test_all_correct(self):
+        gt_entries = [
+            {"horse_id": "B123", "rider_name": "潘顿"},
+            {"horse_id": "A045", "rider_name": "莫雷拉"},
+        ]
+        pred_entries = [
+            {"horse_id": "B123", "person_name": "潘顿"},
+            {"horse_id": "A045", "person_name": "莫雷拉"},
+        ]
+        result = evaluate_single_video(gt_entries, pred_entries)
+        assert result["horse_id"]["f1"] == 1.0
+        assert result["rider"]["f1"] == 1.0
+        assert result["pair"]["f1"] == 1.0
+
+    def test_horse_correct_rider_wrong(self):
+        gt_entries = [{"horse_id": "B123", "rider_name": "潘顿"}]
+        pred_entries = [{"horse_id": "B123", "person_name": "莫雷拉"}]
+        result = evaluate_single_video(gt_entries, pred_entries)
+        assert result["horse_id"]["f1"] == 1.0
+        assert result["rider"]["f1"] == 0.0
+        assert result["pair"]["f1"] == 0.0
+
+    def test_missing_prediction(self):
+        gt_entries = [
+            {"horse_id": "B123", "rider_name": "潘顿"},
+            {"horse_id": "A045", "rider_name": "莫雷拉"},
+        ]
+        pred_entries = [{"horse_id": "B123", "person_name": "潘顿"}]
+        result = evaluate_single_video(gt_entries, pred_entries)
+        assert result["horse_id"]["recall"] == 0.5
+        assert result["rider"]["recall"] == 0.5
+
+    def test_extra_prediction(self):
+        gt_entries = [{"horse_id": "B123", "rider_name": "潘顿"}]
+        pred_entries = [
+            {"horse_id": "B123", "person_name": "潘顿"},
+            {"horse_id": "C999", "person_name": "何泽尧"},
+        ]
+        result = evaluate_single_video(gt_entries, pred_entries)
+        assert result["horse_id"]["precision"] == 0.5
+        assert result["pair"]["precision"] == 0.5
+
+    def test_other_rider_excluded_from_rider_set(self):
+        """系统输出 '其他骑师' 时，骑手维度应忽略该条。"""
+        gt_entries = [{"horse_id": "B123", "rider_name": "潘顿"}]
+        pred_entries = [
+            {"horse_id": "B123", "person_name": "潘顿"},
+            {"horse_id": "A045", "person_name": "其他骑师"},
+        ]
+        result = evaluate_single_video(gt_entries, pred_entries)
+        assert result["rider"]["precision"] == 1.0
+        assert result["rider"]["recall"] == 1.0
