@@ -3,7 +3,7 @@ import { ref, computed } from 'vue';
 import { Upload, FileVideo, CheckCircle, Loader2, PlayCircle, History, Plus } from 'lucide-vue-next';
 import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8001`;
+const API_BASE = import.meta.env.VITE_API_BASE || window.location.origin;
 
 /** 与后端 MIN_SIMPLE_DISPLAY_FRAMES 一致：网页与视频中仅展示累计达到该帧数的鞍垫号码。 */
 const SIMPLE_DISPLAY_MIN_FRAMES = 25;
@@ -32,7 +32,7 @@ const simpleDetectionsFiltered = computed(() => {
   });
 });
 
-const statusText = computed(() => {
+const _statusText = computed(() => {
   switch (processingStatus.value) {
     case 'idle': return '等待提交';
     case 'uploading': return '正在上传';
@@ -149,7 +149,7 @@ const startUpload = async () => {
         <div class="panel-header">
           <h2 class="panel-title">视频上传与预览</h2>
           <p class="requirement-notice">⚠ 要求画面清晰无遮挡</p>
-          <p class="requirement-notice">建议视频时长 < 20s，文件大小 < 50MB <br>视频分辨率不低于1080p</p>
+          <p class="requirement-notice">建议视频时长 &lt; 20s，文件大小 &lt; 100MB <br>视频分辨率不低于1080p </p>
         </div>
 
         <div class="panel-body">

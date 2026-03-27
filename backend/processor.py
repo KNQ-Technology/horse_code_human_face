@@ -383,6 +383,7 @@ def process_video(
     viz_mode = config.runtime.viz_mode if config.runtime.viz_mode else "display"
     print(f"[viz] mode={viz_mode}  pipeline_mode={mode}")
     track_fuser = OCRTrackFuser(config.fusion)
+    hide_numbers = mode == "full"
 
     if not is_simple:
         direction_filter = DirectionFilter(
@@ -393,7 +394,7 @@ def process_video(
         if direction_filter.target_direction != "both":
             print(f"[direction] filter active: target={direction_filter.target_direction}")
 
-    visualizer = ResultVisualizer(viz_mode=viz_mode)
+    visualizer = ResultVisualizer(viz_mode=viz_mode, hide_numbers=hide_numbers)
 
     if not is_simple:
         ri = config.rider_identity_settings
@@ -703,7 +704,7 @@ def process_video(
             vis_frame = visualizer.draw_simple_saddle_footer(
                 vis_frame, simple_footer, MIN_SIMPLE_DISPLAY_FRAMES,
             )
-        if viz_mode == "debug" and not is_simple:
+        if viz_mode == "debug" and not is_simple and not hide_numbers:
             vis_frame = visualizer.draw_roi_comparison_panel(
                 frame=vis_frame,
                 roi_original_bgr=first_roi_raw,

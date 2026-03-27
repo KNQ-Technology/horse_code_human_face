@@ -104,8 +104,9 @@ class PilBatchRenderer:
 class ResultVisualizer:
     """Draw detection and ROI overlays for quick visual inspection."""
 
-    def __init__(self, viz_mode: str = "debug"):
+    def __init__(self, viz_mode: str = "debug", hide_numbers: bool = False):
         self._viz_mode = viz_mode
+        self._hide_numbers = hide_numbers
 
     def draw_frame(
         self,
@@ -155,6 +156,7 @@ class ResultVisualizer:
                     canvas, idx, det, horse_x1, horse_y1, horse_x2, horse_y2,
                     stable_label, rider_name, rider_matched,
                     rider_source, rider_score,
+                    hide_numbers=self._hide_numbers,
                 )
                 continue
 
@@ -169,12 +171,29 @@ class ResultVisualizer:
             cv2.rectangle(canvas, (roi.x1, roi.y1), (roi.x2, roi.y2), _COLOR_ORANGE, 2)
 
             label_main = f"H{idx} {track_label} conf={det.conf:.2f}"
-            label_state = f"ID={stable_label} state={state_label}"
             text_y = max(30, horse_y1 - 8)
-            cv2.putText(canvas, label_main, (horse_x1, text_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, _COLOR_GREEN, 2, cv2.LINE_AA)
-            cv2.putText(canvas, label_state, (horse_x1, text_y + 22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, _COLOR_YELLOW, 2, cv2.LINE_AA)
+            cv2.putText(
+                canvas,
+                label_main,
+                (horse_x1, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                _COLOR_GREEN,
+                2,
+                cv2.LINE_AA,
+            )
+            if not self._hide_numbers:
+                label_state = f"ID={stable_label} state={state_label}"
+                cv2.putText(
+                    canvas,
+                    label_state,
+                    (horse_x1, text_y + 22),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.50,
+                    _COLOR_YELLOW,
+                    2,
+                    cv2.LINE_AA,
+                )
 
             self._draw_rider_label(canvas, horse_x1, text_y + 44,
                                    rider_name, rider_matched, rider_source, rider_score,
@@ -184,7 +203,7 @@ class ResultVisualizer:
                 face_label_name = rider_name if face_score > 0 else ""
                 self._draw_face_box(canvas, face_bbox, face_label_name, face_score)
 
-            if ocr_infos is not None and idx - 1 < len(ocr_infos):
+            if (not self._hide_numbers) and ocr_infos is not None and idx - 1 < len(ocr_infos):
                 ocr_info = ocr_infos[idx - 1]
                 text = str(ocr_info.get("text", ""))
                 conf = float(ocr_info.get("conf", 0.0))
@@ -230,7 +249,7 @@ class ResultVisualizer:
                         name = str(face.get("name", "")) if score > 0 else ""
                         self._draw_face_box(canvas, face_bbox_u, name, score)
 
-            if ocr_infos:
+            if ocr_infos and not self._hide_numbers:
                 self._draw_ocr_summary(canvas, ocr_infos)
         return canvas
 
@@ -248,10 +267,15 @@ class ResultVisualizer:
         rider_matched: bool,
         rider_source: str,
         rider_score: float,
+        hide_numbers: bool = False,
     ) -> None:
         """Display mode: minimal overlay with horse number and rider name only."""
         track_tag = "" if det.track_id is None else f"T{det.track_id}"
-        horse_label = f"#{stable_id}" if stable_id != "--" else (track_tag or f"#{idx}")
+        if hide_numbers:
+            # In full pipeline mode we intentionally hide the recognized numbering.
+            horse_label = "马匹"
+        else:
+            horse_label = f"#{stable_id}" if stable_id != "--" else (track_tag or f"#{idx}")
 
         show_rider = (
             rider_matched
