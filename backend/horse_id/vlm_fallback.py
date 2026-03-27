@@ -45,6 +45,7 @@ class VLMFallback:
     def __init__(self, config: VLMFallbackConfig) -> None:
         self.config = config
         self._last_call_frame: dict[int, int] = {}
+        self._last_seen_frame: dict[int, int] = {}
         self._last_details: dict[int | None, dict[str, str]] = {}
         self._last_valid_result: dict[int, OCRResult] = {}
         self._pending_tracks: set[int] = set()
@@ -165,6 +166,14 @@ class VLMFallback:
 
         self._pending_tracks.discard(track_id)
 
+    def _reset_track(self, track_id: int) -> None:
+        """Clear all cached data for a track (called when track_id is reused)."""
+        self._last_call_frame.pop(track_id, None)
+        self._last_seen_frame.pop(track_id, None)
+        self._last_details.pop(track_id, None)
+        self._last_valid_result.pop(track_id, None)
+        self._pending_tracks.discard(track_id)
+
     def infer(
         self,
         track_id: int | None,
@@ -176,6 +185,20 @@ class VLMFallback:
             return _EMPTY
 
         with self._lock:
+            last_seen = self._last_seen_frame.get(track_id, -9999)
+            gap = frame_idx - last_seen
+
+            # If track was absent for longer than cooldown, the ID was likely
+            # reused for a new horse — purge stale cache to avoid misidentification.
+            if gap > self.config.cooldown_frames and last_seen != -9999:
+                logger.debug(
+                    "VLM: track %d reuse detected (gap=%d frames), clearing stale cache",
+                    track_id, gap,
+                )
+                self._reset_track(track_id)
+
+            self._last_seen_frame[track_id] = frame_idx
+
             last = self._last_call_frame.get(track_id, -9999)
             if frame_idx - last < self.config.cooldown_frames:
                 cached = self._last_valid_result.get(track_id)

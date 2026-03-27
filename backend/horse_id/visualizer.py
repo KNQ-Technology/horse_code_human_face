@@ -531,3 +531,41 @@ class ResultVisualizer:
                         (x0 + 120, y0 + panel_h + 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, _COLOR_WHITE, 2)
         return canvas
+
+    def draw_simple_saddle_footer(
+        self,
+        frame: np.ndarray,
+        confirmed: list[tuple[str, int]],
+        min_frames: int,
+    ) -> np.ndarray:
+        """Draw saddle-pad number summary at the bottom-right (simple / VLM-only mode).
+
+        Args:
+            frame: Input BGR frame (not modified in place; a copy is returned).
+            confirmed: Pairs of ``(horse_id, frame_count)`` that already meet ``min_frames``.
+            min_frames: Threshold label for the waiting hint when nothing is confirmed yet.
+        """
+        canvas = frame.copy()
+        h, w = canvas.shape[:2]
+        margin = 14
+        pad = 10
+        fs = 20
+        if confirmed:
+            body = "  ".join(f"{hid}（{cnt}帧）" for hid, cnt in confirmed)
+            main = f"鞍垫 {body}"
+        else:
+            main = f"鞍垫号码：累计 ≥{min_frames} 帧后显示"
+        tw, th = _text_size_pil(main, fs)
+        bx2 = w - margin
+        by2 = h - margin
+        tx = max(margin, bx2 - tw - pad)
+        ty = max(margin, by2 - th - pad)
+        bx1 = max(0, tx - pad)
+        by1 = max(0, ty - pad)
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (bx1, by1), (bx2, by2), (18, 18, 28), -1)
+        cv2.addWeighted(overlay, 0.62, canvas, 0.38, 0, canvas)
+        cv2.rectangle(canvas, (bx1, by1), (bx2, by2), _COLOR_WHITE, 2)
+        with PilBatchRenderer(canvas) as pil:
+            pil.text((tx, ty), main, fs, _COLOR_WHITE)
+        return canvas

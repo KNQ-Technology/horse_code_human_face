@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -30,7 +30,7 @@ tasks: Dict[str, dict] = {}
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "pipeline.yaml")
 
 
-def process_video_task(task_id: str, filename: str):
+def process_video_task(task_id: str, filename: str, mode: str = "full"):
     tasks[task_id]["status"] = "processing"
 
     uploaded_path = os.path.join(UPLOAD_DIR, f"{task_id}_{filename}")
@@ -46,6 +46,7 @@ def process_video_task(task_id: str, filename: str):
             output_video_path=processed_path,
             tasks=tasks,
             config_path=CONFIG_PATH,
+            mode=mode,
         )
         tasks[task_id]["status"] = "completed"
         tasks[task_id]["progress"] = 100
@@ -57,16 +58,17 @@ def process_video_task(task_id: str, filename: str):
         tasks[task_id]["message"] = f"处理失败: {e}"
 
 @app.post("/api/upload")
-async def upload_video(background_tasks: BackgroundTasks, video: UploadFile = File(...)):
+async def upload_video(
+    background_tasks: BackgroundTasks,
+    video: UploadFile = File(...),
+    mode: str = Form("full"),
+):
     task_id = str(uuid.uuid4())
     
-    # Path to save uploaded video
     file_path = os.path.join(UPLOAD_DIR, f"{task_id}_{video.filename}")
     
-    # Ensure directory exists
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     
-    # Save file
     with open(file_path, "wb") as buffer:
         shutil.copyfileobj(video.file, buffer)
         
@@ -77,8 +79,7 @@ async def upload_video(background_tasks: BackgroundTasks, video: UploadFile = Fi
         "file_path": file_path
     }
     
-    # Start background processing
-    background_tasks.add_task(process_video_task, task_id, video.filename)
+    background_tasks.add_task(process_video_task, task_id, video.filename, mode)
     
     return {
         "code": 200,
