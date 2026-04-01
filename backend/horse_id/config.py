@@ -49,6 +49,20 @@ class VLMFallbackConfig:
     cooldown_frames: int = 10
 
 
+
+@dataclass
+class VLMVideoConfig:
+    api_key: str = ""
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model: str = "qwen3.5-plus"
+    timeout: float = 300.0
+    max_retries: int = 1
+    segment_seconds: int = 15
+    overlap_seconds: int = 3
+    compress_crf: int = 28
+    compress_scale: str = "672:380"
+    fps: float = 2.0
+
 @dataclass
 class EnhanceConfig:
     clahe_clip_limit: float
@@ -107,6 +121,7 @@ class PipelineConfig:
     runtime: RuntimeConfig
     rider_identity_settings: RiderIdentitySettingsConfig | None = None
     vlm_fallback: VLMFallbackConfig | None = None
+    vlm_video: VLMVideoConfig | None = None
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -123,6 +138,10 @@ def load_config(config_path: str | Path) -> PipelineConfig:
     vlm_fallback = VLMFallbackConfig(**vlm_data) if vlm_data else None
     ri_data = data.get("rider_identity", {})
     rider_identity_settings = RiderIdentitySettingsConfig(**ri_data) if ri_data else None
+    vlm_video_data = data.get("vlm_video", {})
+    vlm_video_cfg = VLMVideoConfig(**vlm_video_data) if vlm_video_data else None
+    if vlm_video_cfg and vlm_fallback and vlm_fallback.api_key and not vlm_video_cfg.api_key:
+        vlm_video_cfg.api_key = vlm_fallback.api_key
     return PipelineConfig(
         detector=DetectorConfig(**data["detector"]),
         roi=ROIConfig(**data["roi"]),
@@ -132,5 +151,6 @@ def load_config(config_path: str | Path) -> PipelineConfig:
         runtime=RuntimeConfig(**data["runtime"]),
         rider_identity_settings=rider_identity_settings,
         vlm_fallback=vlm_fallback,
+        vlm_video=vlm_video_cfg,
     )
 

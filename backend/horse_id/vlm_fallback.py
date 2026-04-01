@@ -45,6 +45,7 @@ class VLMFallback:
     def __init__(self, config: VLMFallbackConfig) -> None:
         self.config = config
         self._last_call_frame: dict[int, int] = {}
+        self._last_seen_frame: dict[int, int] = {}
         self._last_details: dict[int | None, dict[str, str]] = {}
         self._last_valid_result: dict[int, OCRResult] = {}
         self._pending_tracks: set[int] = set()
@@ -133,6 +134,7 @@ class VLMFallback:
                         ],
                     }
                 ],
+                extra_body={"enable_thinking":False}
             )
             raw_text = resp.choices[0].message.content or ""
         except Exception:
@@ -160,9 +162,24 @@ class VLMFallback:
         if number and prefix:
             result = OCRResult(text=full_id, conf=0.85, valid=True, raw_text=raw_text)
             with self._lock:
-                self._last_valid_result[track_id] = result
-            logger.info("VLM async done: track=%s => %s", track_id, full_id)
+                existing = self._last_valid_result.get(track_id)
+                if existing is not None and existing.text != full_id:
+                    logger.info(
+                        "VLM conflict rejected: track=%s existing=%s new=%s, keeping existing",
+                        track_id, existing.text, full_id,
+                    )
+                else:
+                    self._last_valid_result[track_id] = result
+                    logger.info("VLM async done: track=%s => %s", track_id, full_id)
 
+        self._pending_tracks.discard(track_id)
+
+    def _reset_track(self, track_id: int) -> None:
+        """Clear all cached data for a track (called when track_id is reused)."""
+        self._last_call_frame.pop(track_id, None)
+        self._last_seen_frame.pop(track_id, None)
+        self._last_details.pop(track_id, None)
+        self._last_valid_result.pop(track_id, None)
         self._pending_tracks.discard(track_id)
 
     def infer(
@@ -176,6 +193,20 @@ class VLMFallback:
             return _EMPTY
 
         with self._lock:
+            last_seen = self._last_seen_frame.get(track_id, -9999)
+            gap = frame_idx - last_seen
+
+            # If track was absent for longer than cooldown, the ID was likely
+            # reused for a new horse — purge stale cache to avoid misidentification.
+            if gap > self.config.cooldown_frames and last_seen != -9999:
+                logger.debug(
+                    "VLM: track %d reuse detected (gap=%d frames), clearing stale cache",
+                    track_id, gap,
+                )
+                self._reset_track(track_id)
+
+            self._last_seen_frame[track_id] = frame_idx
+
             last = self._last_call_frame.get(track_id, -9999)
             if frame_idx - last < self.config.cooldown_frames:
                 cached = self._last_valid_result.get(track_id)
@@ -186,6 +217,11 @@ class VLMFallback:
         if track_id in self._pending_tracks:
             cached = self._last_valid_result.get(track_id)
             return cached if cached is not None else _EMPTY
+
+        with self._lock:
+            locked = self._last_valid_result.get(track_id)
+        if locked is not None:
+            return locked
 
         crop = self._crop_horse(frame, det)
         if crop.size == 0:

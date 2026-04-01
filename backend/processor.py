@@ -24,6 +24,7 @@ from horse_id.track_fusion import OCRTrackFuser
 from horse_id.track_state import TrackStateMachine
 from horse_id.visualizer import ResultVisualizer
 from horse_id.vlm_fallback import VLMFallback
+from horse_id.vlm_video import VLMVideoIdentifier, VLMVideoConfig
 
 
 class _FFmpegWriter:
@@ -120,6 +121,9 @@ MIN_CONFIRMED_FRAMES = 10
 MIN_FACE_FRAMES_FOR_RIDER = 5
 MIN_AVG_CONF = 0.50
 MIN_DURATION_SEC = 2.0
+
+# Simple (VLM-only) mode: IDs shown on video / in API summary after this many frames.
+MIN_SIMPLE_DISPLAY_FRAMES = 25
 
 
 def _aggregate_detections(
@@ -286,17 +290,58 @@ def _aggregate_detections(
     return results
 
 
+def _aggregate_detections_simple(
+    frame_results: list[dict[str, Any]], fps: float
+) -> list[dict[str, str]]:
+    """Aggregate per-frame VLM detections for simple mode.
+
+    No temporal voting — directly counts VLM-detected IDs per track,
+    picks the most frequent ID per track, then deduplicates across tracks.
+    """
+    track_votes: dict[int, dict[str, int]] = {}
+
+    for fr in frame_results:
+        for det in fr.get("detections", []):
+            track_id = det.get("track_id")
+            if track_id is None:
+                continue
+            vlm_id = str(det.get("vlm_id", ""))
+            if not vlm_id:
+                continue
+            if track_id not in track_votes:
+                track_votes[track_id] = {}
+            track_votes[track_id][vlm_id] = track_votes[track_id].get(vlm_id, 0) + 1
+
+    horse_ids: dict[str, int] = {}
+    for _tid, votes in track_votes.items():
+        best_id = max(votes, key=votes.get)  # type: ignore[arg-type]
+        count = votes[best_id]
+        if best_id not in horse_ids or count > horse_ids[best_id]:
+            horse_ids[best_id] = count
+
+    return [
+        {"horse_id": hid, "confidence": f"{count}"}
+        for hid, count in sorted(horse_ids.items())
+        if count >= MIN_SIMPLE_DISPLAY_FRAMES
+    ]
+
+
 def process_video(
     task_id: str,
     video_path: str,
     output_video_path: str,
     tasks: dict,
     config_path: str = "config/pipeline.yaml",
+    mode: str = "full",
 ) -> dict[str, Any]:
-    """Run the full detection pipeline on an uploaded video.
+    """Run the detection pipeline on an uploaded video.
+
+    Args:
+        mode: "full" for complete pipeline, "simple" for VLM saddle-pad only.
 
     Returns a result dict matching the frontend API format.
     """
+    is_simple = mode == "simple"
     config = load_config(config_path)
     config.runtime.input_video = video_path
     config.runtime.output_video = output_video_path
@@ -307,47 +352,62 @@ def process_video(
         raise ValueError(f"Cannot open video: {video_path}")
 
     detector = HorseDetector(config.detector)
-    roi_extractor = ROIExtractor(config.roi)
-    enhancer = ROIEnhancer(config.enhance)
-    ocr_engine = OCREngine(config.ocr, device="gpu:0")
+
+    roi_extractor: ROIExtractor | None = None
+    enhancer: ROIEnhancer | None = None
+    ocr_engine: OCREngine | None = None
+    direction_filter: DirectionFilter | None = None
+    rider_identity: RiderIdentityModule | None = None
+
+    if not is_simple:
+        roi_extractor = ROIExtractor(config.roi)
+        enhancer = ROIEnhancer(config.enhance)
+        ocr_engine = OCREngine(config.ocr, device="gpu:0")
 
     vlm_fallback: VLMFallback | None = None
-    if config.vlm_fallback and config.vlm_fallback.enabled and config.vlm_fallback.api_key:
-        vlm_fallback = VLMFallback(config.vlm_fallback)
-        print("[vlm_fallback] enabled")
-    else:
-        print("[vlm_fallback] disabled")
+    if not is_simple:
+        if config.vlm_fallback and config.vlm_fallback.enabled and config.vlm_fallback.api_key:
+            vlm_cfg = config.vlm_fallback
+            vlm_fallback = VLMFallback(vlm_cfg)
+            print(f"[vlm_fallback] enabled  cooldown_frames={vlm_cfg.cooldown_frames}")
+        else:
+            print("[vlm_fallback] disabled")
 
     viz_mode = config.runtime.viz_mode if config.runtime.viz_mode else "display"
-    print(f"[viz] mode={viz_mode}")
+    print(f"[viz] mode={viz_mode}  pipeline_mode={mode}")
     track_fuser = OCRTrackFuser(config.fusion)
-    direction_filter = DirectionFilter(
-        target_direction=config.runtime.target_direction,
-        min_frames=config.runtime.direction_min_frames,
-        min_displacement_px=config.runtime.direction_min_displacement,
-    )
-    if direction_filter.target_direction != "both":
-        print(f"[direction] filter active: target={direction_filter.target_direction}")
-    visualizer = ResultVisualizer(viz_mode=viz_mode)
+    hide_numbers = mode == "full"
 
-    ri = config.rider_identity_settings
-    rider_identity = RiderIdentityModule(
-        RiderIdentityConfig(
-            face_db_uri=ri.face_db_uri if ri else "",
-            face_collection=ri.face_collection if ri else "rider_faces",
-            face_dim=ri.face_dim if ri else 512,
-            face_min_score=ri.face_min_score if ri else 0.3,
-            face_device=ri.face_device if ri else "cuda",
-            face_models_dir=ri.face_models_dir if ri else "",
-            horse_rider_map_path=ri.horse_rider_map if ri else "",
-            feature_store_path=ri.feature_store_path if ri else "outputs/rider_identity.sqlite",
-            use_feature_store=ri.use_feature_store if ri else True,
+    if not is_simple:
+        direction_filter = DirectionFilter(
+            target_direction=config.runtime.target_direction,
+            min_frames=config.runtime.direction_min_frames,
+            min_displacement_px=config.runtime.direction_min_displacement,
         )
-    )
-    if rider_identity.enabled:
-        print("[rider_identity] enabled")
-    else:
-        print("[rider_identity] disabled")
+        if direction_filter.target_direction != "both":
+            print(f"[direction] filter active: target={direction_filter.target_direction}")
+
+    visualizer = ResultVisualizer(viz_mode=viz_mode, hide_numbers=hide_numbers)
+
+    if not is_simple:
+        ri = config.rider_identity_settings
+        rider_identity = RiderIdentityModule(
+            RiderIdentityConfig(
+                face_db_uri=ri.face_db_uri if ri else "",
+                face_collection=ri.face_collection if ri else "rider_faces",
+                face_dim=ri.face_dim if ri else 512,
+                face_min_score=ri.face_min_score if ri else 0.3,
+                face_device=ri.face_device if ri else "cuda",
+                face_models_dir=ri.face_models_dir if ri else "",
+                horse_rider_map_path=ri.horse_rider_map if ri else "",
+                feature_store_path=ri.feature_store_path if ri else "outputs/rider_identity.sqlite",
+                use_feature_store=ri.use_feature_store if ri else True,
+            )
+        )
+        if rider_identity.enabled:
+            print("[rider_identity] enabled")
+        else:
+            print("[rider_identity] disabled")
 
     ocr_interval_frames = max(1, int(config.ocr.interval_frames))
     ocr_cache_by_track: dict[int, dict[str, object]] = {}
@@ -375,6 +435,8 @@ def process_video(
     frame_results: list[dict[str, Any]] = []
     frame_idx = 0
     start_ts = time.perf_counter()
+    best_crops: dict[int, tuple["np.ndarray", float]] = {}
+
 
     _t_accum: dict[str, float] = {
         "read": 0.0, "yolo": 0.0, "face_det": 0.0, "enhance": 0.0,
@@ -392,13 +454,15 @@ def process_video(
         _t_accum["read"] += time.perf_counter() - _t0
 
         _t0 = time.perf_counter()
-        track_state.begin_frame()
+        if not is_simple:
+            track_state.begin_frame()
         detections = detector.detect(frame)
         _t_accum["yolo"] += time.perf_counter() - _t0
 
-        _t0 = time.perf_counter()
-        rider_identity.begin_frame(frame, frame_idx=frame_idx)
-        _t_accum["face_det"] += time.perf_counter() - _t0
+        if not is_simple and rider_identity is not None:
+            _t0 = time.perf_counter()
+            rider_identity.begin_frame(frame, frame_idx=frame_idx)
+            _t_accum["face_det"] += time.perf_counter() - _t0
 
         cur_h, cur_w = frame.shape[:2]
         det_with_roi = []
@@ -415,6 +479,23 @@ def process_video(
         first_ocr_valid = None
 
         for det in detections:
+            if is_simple:
+                vis_detections.append(det)
+                item = {**asdict(det)}
+                det_with_roi.append(item)
+                if det.track_id is not None:
+                    x1 = max(0, int(round(det.x - det.w / 2)))
+                    y1 = max(0, int(round(det.y - det.h / 2)))
+                    x2 = min(cur_w, int(round(det.x + det.w / 2)))
+                    y2 = min(cur_h, int(round(det.y + det.h / 2)))
+                    area = det.w * det.h
+                    if det.track_id not in best_crops or area > best_crops[det.track_id][1]:
+                        crop = frame[y1:y2, x1:x2].copy()
+                        if crop.size > 0:
+                            best_crops[det.track_id] = (crop, area)
+                continue
+
+            # --- full mode: direction filter → ROI → enhance → OCR → VLM fallback → rider ---
             direction_filter.update(det.track_id, det.x)
             if not direction_filter.should_process(det.track_id):
                 continue
@@ -439,7 +520,7 @@ def process_video(
             _to0 = time.perf_counter()
             ocr_source = "empty"
             if roi_crop.size == 0:
-                ocr_payload: dict[str, object] = {"text": "", "conf": 0.0, "valid": False, "raw_text": ""}
+                ocr_payload = {"text": "", "conf": 0.0, "valid": False, "raw_text": ""}
             else:
                 use_cached = False
                 cached_payload: dict[str, object] | None = None
@@ -467,7 +548,7 @@ def process_video(
             _t_accum["ocr"] += time.perf_counter() - _to0
 
             _tv0 = time.perf_counter()
-            vlm_detail: dict[str, str] = {}
+            vlm_detail = {}
             track_already_locked = det.track_id is not None and det.track_id in track_fuser._locked_ids
             if not ocr_payload["valid"] and vlm_fallback is not None and not track_already_locked:
                 vlm_result = vlm_fallback.infer(
@@ -547,11 +628,18 @@ def process_video(
             det_with_roi.append(item)
 
         _tv0 = time.perf_counter()
-        vis_frame = visualizer.draw_frame(
-            frame=frame, detections=vis_detections, rois=vis_rois, ocr_infos=ocr_infos,
-            unmatched_faces=rider_identity.unmatched_faces if rider_identity.enabled else None,
-        )
-        if viz_mode == "debug":
+        if is_simple:
+            vis_frame = visualizer.draw_frame_boxes_only(frame=frame, detections=vis_detections)
+        else:
+            show_unmatched = (
+                rider_identity is not None
+                and rider_identity.enabled
+            )
+            vis_frame = visualizer.draw_frame(
+                frame=frame, detections=vis_detections, rois=vis_rois, ocr_infos=ocr_infos,
+                unmatched_faces=rider_identity.unmatched_faces if show_unmatched else None,
+            )
+        if viz_mode == "debug" and not is_simple and not hide_numbers:
             vis_frame = visualizer.draw_roi_comparison_panel(
                 frame=vis_frame,
                 roi_original_bgr=first_roi_raw,
@@ -568,7 +656,8 @@ def process_video(
         _t_accum["write"] += time.perf_counter() - _tw0
 
         frame_results.append({"frame_index": frame_idx, "detections": det_with_roi})
-        track_state.end_frame()
+        if not is_simple:
+            track_state.end_frame()
         frame_idx += 1
 
         if total_frames > 0:
@@ -617,7 +706,71 @@ def process_video(
     ss = int(duration_sec) % 60
     duration_str = f"{mm:02d}:{ss:02d}"
 
-    summary_detections = _aggregate_detections(frame_results, fps)
+    track_labels: dict[int, dict[str, str]] = {}
+    if is_simple:
+        _MIN_TRACK_FRAMES = 10
+        track_frame_counts: dict[int, int] = {}
+        for fr in frame_results:
+            for det in fr.get("detections", []):
+                tid = det.get("track_id")
+                if tid is not None:
+                    track_frame_counts[tid] = track_frame_counts.get(tid, 0) + 1
+        before = len(best_crops)
+        for tid in list(best_crops.keys()):
+            cnt = track_frame_counts.get(tid, 0)
+            if cnt < _MIN_TRACK_FRAMES:
+                print(f"[processor] filtering track {tid}: only {cnt} frames (< {_MIN_TRACK_FRAMES})")
+                del best_crops[tid]
+        num_horses = len(best_crops)
+        print(f"[processor] Phase 1 done: {before} tracks detected, {num_horses} kept after filter (>= {_MIN_TRACK_FRAMES} frames)")
+
+        tasks[task_id]["message"] = "YOLO 检测完成，开始逐马 VLM 识别..."
+        tasks[task_id]["progress"] = 60
+        print("[processor] Phase 2: per-track crop VLM identification")
+        vlm_video_cfg_data = config.vlm_video
+        if vlm_video_cfg_data is None:
+            vlm_video_cfg_data = VLMVideoConfig()
+        if not vlm_video_cfg_data.api_key and config.vlm_fallback and config.vlm_fallback.api_key:
+            vlm_video_cfg_data.api_key = config.vlm_fallback.api_key
+        if vlm_video_cfg_data.api_key:
+            vlm_video_identifier = VLMVideoIdentifier(vlm_video_cfg_data)
+            track_labels = vlm_video_identifier.identify_crops(
+                best_crops, tasks=tasks, task_id=task_id,
+            )
+            print(f"[processor] VLM per-track results: {track_labels}")
+        else:
+            print("[processor] WARNING: no api_key for VLM, skipping Phase 2")
+
+        # Phase 3: re-render video with labels on bounding boxes
+        tasks[task_id]["message"] = "正在重新渲染视频..."
+        tasks[task_id]["progress"] = 80
+        print("[processor] Phase 3: re-rendering video with labels")
+        cap2 = cv2.VideoCapture(video_path)
+        writer2 = _create_video_writer(output_video_path, fps, frame_w, frame_h)
+        for fi, fr_data in enumerate(frame_results):
+            ok2, frame2 = cap2.read()
+            if not ok2:
+                break
+            dets_raw = fr_data.get("detections", [])
+            vis_frame2 = visualizer.draw_frame_boxes_with_labels(frame2, dets_raw, track_labels)
+            writer2.write(vis_frame2)
+        cap2.release()
+        writer2.release()
+        print(f"[processor] Phase 3 done: re-rendered {len(frame_results)} frames")
+
+        summary_detections = []
+        for tid, lbl in track_labels.items():
+            entry: dict[str, str] = {"track_id": str(tid)}
+            num = lbl.get("number", "")
+            bg = lbl.get("bg_color", "")
+            prefix = lbl.get("color_prefix", "")
+            horse_id = (prefix + num) if prefix and num else num
+            entry["horse_id"] = horse_id
+            entry["number"] = num
+            entry["bg_color"] = bg
+            summary_detections.append(entry)
+    else:
+        summary_detections = _aggregate_detections(frame_results, fps)
 
     result = {
         "filename": os.path.basename(video_path),
@@ -625,6 +778,7 @@ def process_video(
         "resolution": resolution_str,
         "processed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "detections": summary_detections,
+        "mode": mode,
     }
 
     output_stem = Path(output_video_path).stem

@@ -38,7 +38,7 @@ horse_code_human_face/
 │   │   └── main.ts              # Vue 入口
 │   ├── package.json
 │   └── vite.config.ts
-├── videos/                      # 运行时视频存储（上传 + 处理结果）
+├── /mnt/nas/【赛马会识别】/temp   # 运行时视频存储（上传 + 处理结果，NAS 挂载路径，可在 main.py 中修改）
 ├── API_INTERFACE.md             # API 接口文档
 ├── DEPLOY.md                    # 本文档
 └── .gitignore
@@ -178,10 +178,10 @@ python main.py
 启动成功后输出：
 
 ```
-INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
 ```
 
-**后端监听 `http://0.0.0.0:8000`。**
+**后端监听 `http://0.0.0.0:8001`。**
 
 ---
 
@@ -204,9 +204,9 @@ VITE vX.X.X ready
 ➜  Local:   http://localhost:5173/
 ```
 
-浏览器访问 `http://localhost:5173` 即可。前端会自动请求 `http://localhost:8000` 的后端 API。
+浏览器访问 `http://localhost:5173` 即可。前端会自动请求 `http://<当前主机名>:8001` 的后端 API（可通过环境变量 `VITE_API_BASE` 覆盖）。
 
-> **注意**：开发模式需要同时运行后端（端口 8000）和前端开发服务器（端口 5173）。
+> **注意**：开发模式需要同时运行后端（端口 8001）和前端开发服务器（端口 5173）。
 
 ### 5.2 生产模式（一体化部署）
 
@@ -230,7 +230,7 @@ source venv/bin/activate
 python main.py
 ```
 
-浏览器访问 `http://<服务器IP>:8000` 即可使用完整系统。后端会自动托管 `vue/dist/` 下的静态文件。
+浏览器访问 `http://<服务器IP>:8001` 即可使用完整系统。后端会自动托管 `vue/dist/` 下的静态文件。
 
 ---
 
@@ -298,7 +298,7 @@ GET /api/status?task_id=<uuid>
   "data": {
     "status": "completed",
     "progress": 100,
-    "processed_video_url": "http://localhost:8000/videos/processed_xxx.mp4",
+    "processed_video_url": "http://localhost:8001/videos/processed_xxx.mp4",
     "result": {
       "filename": "race.mp4",
       "duration": "01:30",
@@ -392,14 +392,14 @@ sudo apt install -y ffmpeg
 
 ### Q: 如何在远程服务器部署后从本地访问？
 
-后端默认监听 `0.0.0.0:8000`，可通过服务器 IP 直接访问。如果需要修改端口：
+后端默认监听 `0.0.0.0:8001`，可通过服务器 IP 直接访问。如果需要修改端口：
 
 ```python
 # backend/main.py 最后一行
 uvicorn.run(app, host="0.0.0.0", port=你的端口)
 ```
 
-前端开发模式下 API 地址硬编码为 `http://localhost:8000`，远程部署建议使用**生产模式**（前端构建后由后端托管）。
+前端开发模式下 API 地址默认为 `http://<当前主机名>:8001`（通过 `VITE_API_BASE` 环境变量可覆盖），远程部署建议使用**生产模式**（前端构建后由后端托管）。
 
 ### Q: GPU 加速？
 
@@ -421,7 +421,7 @@ cd backend
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-python main.py                # 后端运行在 http://0.0.0.0:8000
+python main.py                # 后端运行在 http://0.0.0.0:8001
 
 # 3. 前端（新开终端）
 cd vue
@@ -429,5 +429,5 @@ npm install
 npm run build                 # 构建前端
 
 # 4. 访问
-# 浏览器打开 http://localhost:8000
+# 浏览器打开 http://localhost:8001
 ```

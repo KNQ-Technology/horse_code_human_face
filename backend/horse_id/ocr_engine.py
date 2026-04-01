@@ -21,6 +21,7 @@ class OCREngine:
     def __init__(self, config: OCRConfig, device: str = "gpu:0") -> None:
         self.config = config
         self.ocr = PaddleOCR(
+            ocr_version="PP-OCRv4",
             use_textline_orientation=False,
             lang=config.lang,
             device=device,

@@ -104,8 +104,9 @@ class PilBatchRenderer:
 class ResultVisualizer:
     """Draw detection and ROI overlays for quick visual inspection."""
 
-    def __init__(self, viz_mode: str = "debug"):
+    def __init__(self, viz_mode: str = "debug", hide_numbers: bool = False):
         self._viz_mode = viz_mode
+        self._hide_numbers = hide_numbers
 
     def draw_frame(
         self,
@@ -155,6 +156,7 @@ class ResultVisualizer:
                     canvas, idx, det, horse_x1, horse_y1, horse_x2, horse_y2,
                     stable_label, rider_name, rider_matched,
                     rider_source, rider_score,
+                    hide_numbers=self._hide_numbers,
                 )
                 continue
 
@@ -169,12 +171,29 @@ class ResultVisualizer:
             cv2.rectangle(canvas, (roi.x1, roi.y1), (roi.x2, roi.y2), _COLOR_ORANGE, 2)
 
             label_main = f"H{idx} {track_label} conf={det.conf:.2f}"
-            label_state = f"ID={stable_label} state={state_label}"
             text_y = max(30, horse_y1 - 8)
-            cv2.putText(canvas, label_main, (horse_x1, text_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, _COLOR_GREEN, 2, cv2.LINE_AA)
-            cv2.putText(canvas, label_state, (horse_x1, text_y + 22),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.50, _COLOR_YELLOW, 2, cv2.LINE_AA)
+            cv2.putText(
+                canvas,
+                label_main,
+                (horse_x1, text_y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                _COLOR_GREEN,
+                2,
+                cv2.LINE_AA,
+            )
+            if not self._hide_numbers:
+                label_state = f"ID={stable_label} state={state_label}"
+                cv2.putText(
+                    canvas,
+                    label_state,
+                    (horse_x1, text_y + 22),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.50,
+                    _COLOR_YELLOW,
+                    2,
+                    cv2.LINE_AA,
+                )
 
             self._draw_rider_label(canvas, horse_x1, text_y + 44,
                                    rider_name, rider_matched, rider_source, rider_score,
@@ -184,7 +203,7 @@ class ResultVisualizer:
                 face_label_name = rider_name if face_score > 0 else ""
                 self._draw_face_box(canvas, face_bbox, face_label_name, face_score)
 
-            if ocr_infos is not None and idx - 1 < len(ocr_infos):
+            if (not self._hide_numbers) and ocr_infos is not None and idx - 1 < len(ocr_infos):
                 ocr_info = ocr_infos[idx - 1]
                 text = str(ocr_info.get("text", ""))
                 conf = float(ocr_info.get("conf", 0.0))
@@ -230,8 +249,72 @@ class ResultVisualizer:
                         name = str(face.get("name", "")) if score > 0 else ""
                         self._draw_face_box(canvas, face_bbox_u, name, score)
 
-            if ocr_infos:
+            if ocr_infos and not self._hide_numbers:
                 self._draw_ocr_summary(canvas, ocr_infos)
+        return canvas
+
+
+    def draw_frame_boxes_only(
+        self,
+        frame: "np.ndarray",
+        detections: list,
+    ) -> "np.ndarray":
+        """Draw only bounding boxes with track labels — no ID/rider overlays."""
+        canvas = frame.copy()
+        for idx, det in enumerate(detections, start=1):
+            x1 = int(round(det.x - det.w / 2.0))
+            y1 = int(round(det.y - det.h / 2.0))
+            x2 = int(round(det.x + det.w / 2.0))
+            y2 = int(round(det.y + det.h / 2.0))
+            track_tag = f"T{det.track_id}" if det.track_id is not None else f"H{idx}"
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), _COLOR_WHITE, 2)
+            label = f"{track_tag} {det.conf:.2f}"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+            label_y = max(th + 6, y1 - 6)
+            cv2.rectangle(canvas, (x1 - 1, label_y - th - 4), (x1 + tw + 4, label_y + 2), (0, 0, 0), -1)
+            cv2.putText(canvas, label, (x1, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, _COLOR_WHITE, 2, cv2.LINE_AA)
+        return canvas
+
+    def draw_frame_boxes_with_labels(
+        self,
+        frame: "np.ndarray",
+        detections_raw: list[dict],
+        track_labels: dict[int, dict[str, str]],
+    ) -> "np.ndarray":
+        """Draw bounding boxes with horse number labels from VLM results.
+
+        detections_raw: list of dicts from frame_results (asdict output).
+        track_labels: mapping track_id -> {number, bg_color, color_prefix}.
+        """
+        canvas = frame.copy()
+        for idx, det in enumerate(detections_raw, start=1):
+            cx = float(det.get("x", 0))
+            cy = float(det.get("y", 0))
+            w = float(det.get("w", 0))
+            h = float(det.get("h", 0))
+            tid = det.get("track_id")
+            x1 = int(round(cx - w / 2.0))
+            y1 = int(round(cy - h / 2.0))
+            x2 = int(round(cx + w / 2.0))
+            y2 = int(round(cy + h / 2.0))
+
+            lbl_info = track_labels.get(tid, {}) if tid is not None else {}
+            number = lbl_info.get("number", "")
+            prefix = lbl_info.get("color_prefix", "")
+            horse_id = (prefix + number) if prefix and number else number
+
+            if horse_id:
+                label = f"#{horse_id}"
+                box_color = _COLOR_GREEN
+            else:
+                label = "?"
+                box_color = _COLOR_WHITE
+
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), box_color, 2)
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            label_y = max(th + 6, y1 - 6)
+            cv2.rectangle(canvas, (x1 - 1, label_y - th - 4), (x1 + tw + 4, label_y + 2), (0, 0, 0), -1)
+            cv2.putText(canvas, label, (x1, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2, cv2.LINE_AA)
         return canvas
 
     _DISPLAY_TRUSTED_SOURCES = {"face", "face_locked"}
@@ -248,10 +331,15 @@ class ResultVisualizer:
         rider_matched: bool,
         rider_source: str,
         rider_score: float,
+        hide_numbers: bool = False,
     ) -> None:
         """Display mode: minimal overlay with horse number and rider name only."""
         track_tag = "" if det.track_id is None else f"T{det.track_id}"
-        horse_label = f"#{stable_id}" if stable_id != "--" else (track_tag or f"#{idx}")
+        if hide_numbers:
+            # In full pipeline mode we intentionally hide the recognized numbering.
+            horse_label = "马匹"
+        else:
+            horse_label = f"#{stable_id}" if stable_id != "--" else (track_tag or f"#{idx}")
 
         show_rider = (
             rider_matched
@@ -530,4 +618,42 @@ class ResultVisualizer:
             cv2.putText(canvas, f"OCR={text_show} conf={ocr_conf:.2f} [{status}]",
                         (x0 + 120, y0 + panel_h + 22),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.65, _COLOR_WHITE, 2)
+        return canvas
+
+    def draw_simple_saddle_footer(
+        self,
+        frame: np.ndarray,
+        confirmed: list[tuple[str, int]],
+        min_frames: int,
+    ) -> np.ndarray:
+        """Draw saddle-pad number summary at the bottom-right (simple / VLM-only mode).
+
+        Args:
+            frame: Input BGR frame (not modified in place; a copy is returned).
+            confirmed: Pairs of ``(horse_id, frame_count)`` that already meet ``min_frames``.
+            min_frames: Threshold label for the waiting hint when nothing is confirmed yet.
+        """
+        canvas = frame.copy()
+        h, w = canvas.shape[:2]
+        margin = 14
+        pad = 10
+        fs = 20
+        if confirmed:
+            body = "  ".join(f"{hid}（{cnt}帧）" for hid, cnt in confirmed)
+            main = f"鞍垫 {body}"
+        else:
+            main = f"鞍垫号码：累计 ≥{min_frames} 帧后显示"
+        tw, th = _text_size_pil(main, fs)
+        bx2 = w - margin
+        by2 = h - margin
+        tx = max(margin, bx2 - tw - pad)
+        ty = max(margin, by2 - th - pad)
+        bx1 = max(0, tx - pad)
+        by1 = max(0, ty - pad)
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (bx1, by1), (bx2, by2), (18, 18, 28), -1)
+        cv2.addWeighted(overlay, 0.62, canvas, 0.38, 0, canvas)
+        cv2.rectangle(canvas, (bx1, by1), (bx2, by2), _COLOR_WHITE, 2)
+        with PilBatchRenderer(canvas) as pil:
+            pil.text((tx, ty), main, fs, _COLOR_WHITE)
         return canvas
