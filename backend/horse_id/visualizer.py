@@ -253,6 +253,70 @@ class ResultVisualizer:
                 self._draw_ocr_summary(canvas, ocr_infos)
         return canvas
 
+
+    def draw_frame_boxes_only(
+        self,
+        frame: "np.ndarray",
+        detections: list,
+    ) -> "np.ndarray":
+        """Draw only bounding boxes with track labels — no ID/rider overlays."""
+        canvas = frame.copy()
+        for idx, det in enumerate(detections, start=1):
+            x1 = int(round(det.x - det.w / 2.0))
+            y1 = int(round(det.y - det.h / 2.0))
+            x2 = int(round(det.x + det.w / 2.0))
+            y2 = int(round(det.y + det.h / 2.0))
+            track_tag = f"T{det.track_id}" if det.track_id is not None else f"H{idx}"
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), _COLOR_WHITE, 2)
+            label = f"{track_tag} {det.conf:.2f}"
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 2)
+            label_y = max(th + 6, y1 - 6)
+            cv2.rectangle(canvas, (x1 - 1, label_y - th - 4), (x1 + tw + 4, label_y + 2), (0, 0, 0), -1)
+            cv2.putText(canvas, label, (x1, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, _COLOR_WHITE, 2, cv2.LINE_AA)
+        return canvas
+
+    def draw_frame_boxes_with_labels(
+        self,
+        frame: "np.ndarray",
+        detections_raw: list[dict],
+        track_labels: dict[int, dict[str, str]],
+    ) -> "np.ndarray":
+        """Draw bounding boxes with horse number labels from VLM results.
+
+        detections_raw: list of dicts from frame_results (asdict output).
+        track_labels: mapping track_id -> {number, bg_color, color_prefix}.
+        """
+        canvas = frame.copy()
+        for idx, det in enumerate(detections_raw, start=1):
+            cx = float(det.get("x", 0))
+            cy = float(det.get("y", 0))
+            w = float(det.get("w", 0))
+            h = float(det.get("h", 0))
+            tid = det.get("track_id")
+            x1 = int(round(cx - w / 2.0))
+            y1 = int(round(cy - h / 2.0))
+            x2 = int(round(cx + w / 2.0))
+            y2 = int(round(cy + h / 2.0))
+
+            lbl_info = track_labels.get(tid, {}) if tid is not None else {}
+            number = lbl_info.get("number", "")
+            prefix = lbl_info.get("color_prefix", "")
+            horse_id = (prefix + number) if prefix and number else number
+
+            if horse_id:
+                label = f"#{horse_id}"
+                box_color = _COLOR_GREEN
+            else:
+                label = "?"
+                box_color = _COLOR_WHITE
+
+            cv2.rectangle(canvas, (x1, y1), (x2, y2), box_color, 2)
+            (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)
+            label_y = max(th + 6, y1 - 6)
+            cv2.rectangle(canvas, (x1 - 1, label_y - th - 4), (x1 + tw + 4, label_y + 2), (0, 0, 0), -1)
+            cv2.putText(canvas, label, (x1, label_y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, box_color, 2, cv2.LINE_AA)
+        return canvas
+
     _DISPLAY_TRUSTED_SOURCES = {"face", "face_locked"}
     _DISPLAY_MIN_RIDER_SCORE = 0.35
 

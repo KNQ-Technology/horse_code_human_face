@@ -5,6 +5,7 @@ from fastapi.responses import FileResponse
 import traceback
 import uuid
 import os
+import re
 import shutil
 from typing import Dict
 
@@ -12,10 +13,9 @@ from processor import process_video
 
 app = FastAPI()
 
-VIDEOS_DIR = "/mnt/nas/【赛马会识别】/temp"
-UPLOAD_DIR = os.path.join(VIDEOS_DIR, "upload")
-
-os.makedirs(UPLOAD_DIR, exist_ok=True)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+LEGACY_VIDEOS_DIR = "/mnt/nas/【赛马会识别】/temp"
+APP_PORT = int(os.getenv("PORT", "8001"))
 
 app.add_middleware(
     CORSMiddleware,
@@ -27,7 +27,38 @@ app.add_middleware(
 
 tasks: Dict[str, dict] = {}
 
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config", "pipeline.yaml")
+CONFIG_PATH = os.getenv("PIPELINE_CONFIG", os.path.join(BASE_DIR, "config", "pipeline.yaml"))
+
+
+def _sanitize_error_message(exc: Exception) -> str:
+    raw_message = str(exc).strip() or exc.__class__.__name__
+    sanitized = re.sub(r"(?:[A-Za-z]:)?/[^\s]+", "<path>", raw_message)
+    return sanitized
+
+
+def _choose_videos_dir() -> str:
+    env_dir = os.getenv("VIDEOS_DIR", "").strip()
+    candidates = [env_dir] if env_dir else [LEGACY_VIDEOS_DIR, os.path.join(BASE_DIR, "outputs", "videos")]
+    for candidate in candidates:
+        try:
+            upload_dir = os.path.join(candidate, "upload")
+            os.makedirs(upload_dir, exist_ok=True)
+            probe_path = os.path.join(upload_dir, ".write_probe")
+            with open(probe_path, "w", encoding="utf-8") as probe:
+                probe.write("ok")
+            os.remove(probe_path)
+            return candidate
+        except OSError:
+            continue
+    raise RuntimeError("No writable video directory available. Set VIDEOS_DIR to a writable path.")
+
+
+def _public_task_state(task: dict) -> dict:
+    return {key: value for key, value in task.items() if key != "file_path"}
+
+
+VIDEOS_DIR = _choose_videos_dir()
+UPLOAD_DIR = os.path.join(VIDEOS_DIR, "upload")
 
 
 def process_video_task(task_id: str, filename: str, mode: str = "full"):
@@ -55,7 +86,7 @@ def process_video_task(task_id: str, filename: str, mode: str = "full"):
     except Exception as e:
         traceback.print_exc()
         tasks[task_id]["status"] = "error"
-        tasks[task_id]["message"] = f"处理失败: {e}"
+        tasks[task_id]["message"] = f"处理失败: {_sanitize_error_message(e)}"
 
 @app.post("/api/upload")
 async def upload_video(
@@ -96,11 +127,11 @@ async def get_status(task_id: str):
     
     return {
         "code": 200,
-        "data": tasks[task_id]
+        "data": _public_task_state(tasks[task_id])
     }
 
 # 1. Map assets (js, css)
-vue_dist = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "vue", "dist"))
+vue_dist = os.path.abspath(os.path.join(BASE_DIR, "..", "vue", "dist"))
 if os.path.exists(vue_dist):
     app.mount("/assets", StaticFiles(directory=os.path.join(vue_dist, "assets")), name="assets")
 
@@ -118,4 +149,4 @@ async def serve_vue(full_path: str):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=APP_PORT)

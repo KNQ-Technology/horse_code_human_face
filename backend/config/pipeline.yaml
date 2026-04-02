@@ -65,9 +65,16 @@ rider_identity:
 
 vlm_fallback:
   enabled: true
-  api_key: "sk-719e95ee5d37494b9951203864312e2d"
+  api_key: ""
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
-  model: "qwen-vl-max"
-  timeout: 15.0
+  model: "qwen3.5-plus"
+  timeout: 300.0
   max_retries: 1
-  cooldown_frames: 75
+  cooldown_frames: 15
+
+vlm_video:
+  segment_seconds: 15
+  overlap_seconds: 3
+  compress_crf: 28
+  compress_scale: "672:380"
+  fps: 2

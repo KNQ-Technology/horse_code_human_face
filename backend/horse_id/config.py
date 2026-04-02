@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,20 @@ class VLMFallbackConfig:
     max_retries: int = 1
     cooldown_frames: int = 10
 
+
+
+@dataclass
+class VLMVideoConfig:
+    api_key: str = ""
+    base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
+    model: str = "qwen3.5-plus"
+    timeout: float = 300.0
+    max_retries: int = 1
+    segment_seconds: int = 15
+    overlap_seconds: int = 3
+    compress_crf: int = 28
+    compress_scale: str = "672:380"
+    fps: float = 2.0
 
 @dataclass
 class EnhanceConfig:
@@ -107,6 +122,7 @@ class PipelineConfig:
     runtime: RuntimeConfig
     rider_identity_settings: RiderIdentitySettingsConfig | None = None
     vlm_fallback: VLMFallbackConfig | None = None
+    vlm_video: VLMVideoConfig | None = None
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -117,12 +133,103 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+def _resolve_local_path(value: str, base_dir: Path) -> str:
+    raw = (value or "").strip()
+    if not raw:
+        return raw
+    if raw.startswith(("http://", "https://", "tcp://", "udp://")):
+        return raw
+    candidate = Path(raw).expanduser()
+    if candidate.is_absolute():
+        return str(candidate.resolve())
+    return str((base_dir / candidate).resolve())
+
+
+def _apply_env_overrides(data: dict[str, Any], base_dir: Path) -> dict[str, Any]:
+    config = dict(data)
+
+    detector_data = dict(config.get("detector", {}))
+    if detector_data.get("model_path"):
+        detector_data["model_path"] = _resolve_local_path(detector_data["model_path"], base_dir)
+    detector_device = os.getenv("DETECTOR_DEVICE")
+    if detector_device:
+        detector_data["device"] = detector_device
+    config["detector"] = detector_data
+
+    ocr_data = dict(config.get("ocr", {}))
+    ocr_lang = os.getenv("OCR_LANG")
+    if ocr_lang:
+        ocr_data["lang"] = ocr_lang
+    config["ocr"] = ocr_data
+
+    runtime_data = dict(config.get("runtime", {}))
+    viz_mode = os.getenv("VIZ_MODE")
+    if viz_mode:
+        runtime_data["viz_mode"] = viz_mode
+    config["runtime"] = runtime_data
+
+    ri_data = dict(config.get("rider_identity", {}))
+    face_db_uri = os.getenv("FACE_DB_URI")
+    if face_db_uri:
+        ri_data["face_db_uri"] = face_db_uri
+    if ri_data.get("face_db_uri"):
+        ri_data["face_db_uri"] = _resolve_local_path(ri_data["face_db_uri"], base_dir)
+    face_models_dir = os.getenv("FACE_MODELS_DIR")
+    if face_models_dir:
+        ri_data["face_models_dir"] = face_models_dir
+    if ri_data.get("face_models_dir"):
+        ri_data["face_models_dir"] = _resolve_local_path(ri_data["face_models_dir"], base_dir)
+    horse_rider_map = os.getenv("HORSE_RIDER_MAP")
+    if horse_rider_map:
+        ri_data["horse_rider_map"] = horse_rider_map
+    if ri_data.get("horse_rider_map"):
+        ri_data["horse_rider_map"] = _resolve_local_path(ri_data["horse_rider_map"], base_dir)
+    feature_store_path = os.getenv("RIDER_FEATURE_STORE_PATH")
+    if feature_store_path:
+        ri_data["feature_store_path"] = feature_store_path
+    if ri_data.get("feature_store_path"):
+        ri_data["feature_store_path"] = _resolve_local_path(ri_data["feature_store_path"], base_dir)
+    face_device = os.getenv("FACE_DEVICE")
+    if face_device:
+        ri_data["face_device"] = face_device
+    config["rider_identity"] = ri_data
+
+    vlm_data = dict(config.get("vlm_fallback", {}))
+    vlm_api_key = os.getenv("VLM_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
+    if vlm_api_key:
+        vlm_data["api_key"] = vlm_api_key
+    vlm_base_url = os.getenv("VLM_BASE_URL")
+    if vlm_base_url:
+        vlm_data["base_url"] = vlm_base_url
+    vlm_model = os.getenv("VLM_MODEL")
+    if vlm_model:
+        vlm_data["model"] = vlm_model
+    config["vlm_fallback"] = vlm_data
+
+    vlm_video_data = dict(config.get("vlm_video", {}))
+    if vlm_api_key:
+        vlm_video_data["api_key"] = vlm_api_key
+    if vlm_base_url:
+        vlm_video_data["base_url"] = vlm_base_url
+    if vlm_model:
+        vlm_video_data["model"] = vlm_model
+    config["vlm_video"] = vlm_video_data
+
+    return config
+
+
 def load_config(config_path: str | Path) -> PipelineConfig:
-    data = _load_yaml(Path(config_path))
+    config_file = Path(config_path).expanduser().resolve()
+    project_dir = config_file.parent.parent
+    data = _apply_env_overrides(_load_yaml(config_file), project_dir)
     vlm_data = data.get("vlm_fallback", {})
     vlm_fallback = VLMFallbackConfig(**vlm_data) if vlm_data else None
     ri_data = data.get("rider_identity", {})
     rider_identity_settings = RiderIdentitySettingsConfig(**ri_data) if ri_data else None
+    vlm_video_data = data.get("vlm_video", {})
+    vlm_video_cfg = VLMVideoConfig(**vlm_video_data) if vlm_video_data else None
+    if vlm_video_cfg and vlm_fallback and vlm_fallback.api_key and not vlm_video_cfg.api_key:
+        vlm_video_cfg.api_key = vlm_fallback.api_key
     return PipelineConfig(
         detector=DetectorConfig(**data["detector"]),
         roi=ROIConfig(**data["roi"]),
@@ -132,5 +239,6 @@ def load_config(config_path: str | Path) -> PipelineConfig:
         runtime=RuntimeConfig(**data["runtime"]),
         rider_identity_settings=rider_identity_settings,
         vlm_fallback=vlm_fallback,
+        vlm_video=vlm_video_cfg,
     )
 

@@ -134,6 +134,7 @@ class VLMFallback:
                         ],
                     }
                 ],
+                extra_body={"enable_thinking":False}
             )
             raw_text = resp.choices[0].message.content or ""
         except Exception:
@@ -161,8 +162,15 @@ class VLMFallback:
         if number and prefix:
             result = OCRResult(text=full_id, conf=0.85, valid=True, raw_text=raw_text)
             with self._lock:
-                self._last_valid_result[track_id] = result
-            logger.info("VLM async done: track=%s => %s", track_id, full_id)
+                existing = self._last_valid_result.get(track_id)
+                if existing is not None and existing.text != full_id:
+                    logger.info(
+                        "VLM conflict rejected: track=%s existing=%s new=%s, keeping existing",
+                        track_id, existing.text, full_id,
+                    )
+                else:
+                    self._last_valid_result[track_id] = result
+                    logger.info("VLM async done: track=%s => %s", track_id, full_id)
 
         self._pending_tracks.discard(track_id)
 
@@ -209,6 +217,11 @@ class VLMFallback:
         if track_id in self._pending_tracks:
             cached = self._last_valid_result.get(track_id)
             return cached if cached is not None else _EMPTY
+
+        with self._lock:
+            locked = self._last_valid_result.get(track_id)
+        if locked is not None:
+            return locked
 
         crop = self._crop_horse(frame, det)
         if crop.size == 0:

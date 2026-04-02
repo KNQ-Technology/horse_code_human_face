@@ -24,6 +24,7 @@ from horse_id.track_fusion import OCRTrackFuser
 from horse_id.track_state import TrackStateMachine
 from horse_id.visualizer import ResultVisualizer
 from horse_id.vlm_fallback import VLMFallback
+from horse_id.vlm_video import VLMVideoIdentifier, VLMVideoConfig
 
 
 class _FFmpegWriter:
@@ -364,21 +365,13 @@ def process_video(
         ocr_engine = OCREngine(config.ocr, device="gpu:0")
 
     vlm_fallback: VLMFallback | None = None
-    if config.vlm_fallback and config.vlm_fallback.enabled and config.vlm_fallback.api_key:
-        vlm_cfg = config.vlm_fallback
-        if is_simple:
-            # In simple mode VLM is the sole detector; reduce cooldown so the
-            # next call fires as soon as the previous response arrives (~0.5s gap).
-            from dataclasses import replace as _dc_replace
-            vlm_cfg = _dc_replace(vlm_cfg, cooldown_frames=15)
-            print(f"[vlm_fallback] simple mode: cooldown_frames overridden to {vlm_cfg.cooldown_frames}")
-        vlm_fallback = VLMFallback(vlm_cfg)
-        print(f"[vlm_fallback] enabled  cooldown_frames={vlm_cfg.cooldown_frames}")
-    else:
-        print("[vlm_fallback] disabled")
-
-    if is_simple and vlm_fallback is None:
-        raise ValueError("simple mode requires vlm_fallback to be enabled with a valid api_key")
+    if not is_simple:
+        if config.vlm_fallback and config.vlm_fallback.enabled and config.vlm_fallback.api_key:
+            vlm_cfg = config.vlm_fallback
+            vlm_fallback = VLMFallback(vlm_cfg)
+            print(f"[vlm_fallback] enabled  cooldown_frames={vlm_cfg.cooldown_frames}")
+        else:
+            print("[vlm_fallback] disabled")
 
     viz_mode = config.runtime.viz_mode if config.runtime.viz_mode else "display"
     print(f"[viz] mode={viz_mode}  pipeline_mode={mode}")
@@ -442,8 +435,8 @@ def process_video(
     frame_results: list[dict[str, Any]] = []
     frame_idx = 0
     start_ts = time.perf_counter()
-    # Per-track VLM id vote counts (simple mode) for display gating + footer overlay.
-    simple_track_votes: dict[int, dict[str, int]] = {}
+    best_crops: dict[int, tuple["np.ndarray", float]] = {}
+
 
     _t_accum: dict[str, float] = {
         "read": 0.0, "yolo": 0.0, "face_det": 0.0, "enhance": 0.0,
@@ -488,66 +481,18 @@ def process_video(
         for det in detections:
             if is_simple:
                 vis_detections.append(det)
-                vis_rois.append(ROIBox(x1=0, y1=0, x2=0, y2=0))
-
-                _tv0 = time.perf_counter()
-                vlm_detail: dict[str, str] = {}
-                if vlm_fallback is not None:
-                    vlm_result = vlm_fallback.infer(
-                        track_id=det.track_id, frame=frame, det=det, frame_idx=frame_idx,
-                    )
-                    vlm_detail = vlm_fallback.get_detail(det.track_id)
-                _t_accum["vlm"] += time.perf_counter() - _tv0
-
-                vlm_full_id = vlm_detail.get("full_id", "")
-                vlm_conf = 0.85 if vlm_full_id else 0.0
-
-                tid = det.track_id
-                display_vlm_id = ""
-                if tid is not None and vlm_full_id:
-                    if tid not in simple_track_votes:
-                        simple_track_votes[tid] = {}
-                    tv = simple_track_votes[tid]
-                    tv[vlm_full_id] = tv.get(vlm_full_id, 0) + 1
-                    best_for_track = max(tv, key=tv.get)  # type: ignore[arg-type]
-                    if tv[best_for_track] >= MIN_SIMPLE_DISPLAY_FRAMES:
-                        display_vlm_id = best_for_track
-
-                ocr_infos.append({
-                    "track_id": det.track_id,
-                    "text": display_vlm_id,
-                    "conf": vlm_conf,
-                    "valid": bool(display_vlm_id),
-                    "ocr_source": "vlm" if vlm_full_id else "empty",
-                    "stable_id": display_vlm_id,
-                    "stable_ready": bool(display_vlm_id),
-                    "state": "CONFIRMED" if display_vlm_id else "UNCONFIRMED",
-                    "state_id": display_vlm_id,
-                    "rider_name": "",
-                    "rider_score": 0.0,
-                    "rider_matched": False,
-                    "rider_source": "none",
-                    "rider_code": "",
-                    "rider_status": "",
-                    "rider_new": False,
-                    "face_bbox": [],
-                    "face_score": 0.0,
-                    "face_detected": False,
-                    "horse_id": "",
-                    "vlm_bg": vlm_detail.get("bg_color", ""),
-                    "vlm_font": vlm_detail.get("font_color", ""),
-                    "vlm_number": vlm_detail.get("number", ""),
-                    "vlm_prefix": vlm_detail.get("prefix", ""),
-                    "vlm_full_id": vlm_full_id,
-                })
-
-                item = {
-                    **asdict(det),
-                    "vlm_id": vlm_full_id,
-                    "vlm_conf": vlm_conf,
-                    "vlm_detail": vlm_detail,
-                }
+                item = {**asdict(det)}
                 det_with_roi.append(item)
+                if det.track_id is not None:
+                    x1 = max(0, int(round(det.x - det.w / 2)))
+                    y1 = max(0, int(round(det.y - det.h / 2)))
+                    x2 = min(cur_w, int(round(det.x + det.w / 2)))
+                    y2 = min(cur_h, int(round(det.y + det.h / 2)))
+                    area = det.w * det.h
+                    if det.track_id not in best_crops or area > best_crops[det.track_id][1]:
+                        crop = frame[y1:y2, x1:x2].copy()
+                        if crop.size > 0:
+                            best_crops[det.track_id] = (crop, area)
                 continue
 
             # --- full mode: direction filter → ROI → enhance → OCR → VLM fallback → rider ---
@@ -683,26 +628,16 @@ def process_video(
             det_with_roi.append(item)
 
         _tv0 = time.perf_counter()
-        show_unmatched = (
-            not is_simple
-            and rider_identity is not None
-            and rider_identity.enabled
-        )
-        vis_frame = visualizer.draw_frame(
-            frame=frame, detections=vis_detections, rois=vis_rois, ocr_infos=ocr_infos,
-            unmatched_faces=rider_identity.unmatched_faces if show_unmatched else None,
-        )
         if is_simple:
-            footer_dedup: dict[str, int] = {}
-            for _tid, votes in simple_track_votes.items():
-                if not votes:
-                    continue
-                bid, cnt = max(votes.items(), key=lambda kv: kv[1])
-                if cnt >= MIN_SIMPLE_DISPLAY_FRAMES:
-                    footer_dedup[bid] = max(footer_dedup.get(bid, 0), cnt)
-            simple_footer = sorted(footer_dedup.items())
-            vis_frame = visualizer.draw_simple_saddle_footer(
-                vis_frame, simple_footer, MIN_SIMPLE_DISPLAY_FRAMES,
+            vis_frame = visualizer.draw_frame_boxes_only(frame=frame, detections=vis_detections)
+        else:
+            show_unmatched = (
+                rider_identity is not None
+                and rider_identity.enabled
+            )
+            vis_frame = visualizer.draw_frame(
+                frame=frame, detections=vis_detections, rois=vis_rois, ocr_infos=ocr_infos,
+                unmatched_faces=rider_identity.unmatched_faces if show_unmatched else None,
             )
         if viz_mode == "debug" and not is_simple and not hide_numbers:
             vis_frame = visualizer.draw_roi_comparison_panel(
@@ -771,8 +706,69 @@ def process_video(
     ss = int(duration_sec) % 60
     duration_str = f"{mm:02d}:{ss:02d}"
 
+    track_labels: dict[int, dict[str, str]] = {}
     if is_simple:
-        summary_detections = _aggregate_detections_simple(frame_results, fps)
+        _MIN_TRACK_FRAMES = 10
+        track_frame_counts: dict[int, int] = {}
+        for fr in frame_results:
+            for det in fr.get("detections", []):
+                tid = det.get("track_id")
+                if tid is not None:
+                    track_frame_counts[tid] = track_frame_counts.get(tid, 0) + 1
+        before = len(best_crops)
+        for tid in list(best_crops.keys()):
+            cnt = track_frame_counts.get(tid, 0)
+            if cnt < _MIN_TRACK_FRAMES:
+                print(f"[processor] filtering track {tid}: only {cnt} frames (< {_MIN_TRACK_FRAMES})")
+                del best_crops[tid]
+        num_horses = len(best_crops)
+        print(f"[processor] Phase 1 done: {before} tracks detected, {num_horses} kept after filter (>= {_MIN_TRACK_FRAMES} frames)")
+
+        tasks[task_id]["message"] = "YOLO 检测完成，开始逐马 VLM 识别..."
+        tasks[task_id]["progress"] = 60
+        print("[processor] Phase 2: per-track crop VLM identification")
+        vlm_video_cfg_data = config.vlm_video
+        if vlm_video_cfg_data is None:
+            vlm_video_cfg_data = VLMVideoConfig()
+        if not vlm_video_cfg_data.api_key and config.vlm_fallback and config.vlm_fallback.api_key:
+            vlm_video_cfg_data.api_key = config.vlm_fallback.api_key
+        if vlm_video_cfg_data.api_key:
+            vlm_video_identifier = VLMVideoIdentifier(vlm_video_cfg_data)
+            track_labels = vlm_video_identifier.identify_crops(
+                best_crops, tasks=tasks, task_id=task_id,
+            )
+            print(f"[processor] VLM per-track results: {track_labels}")
+        else:
+            print("[processor] WARNING: no api_key for VLM, skipping Phase 2")
+
+        # Phase 3: re-render video with labels on bounding boxes
+        tasks[task_id]["message"] = "正在重新渲染视频..."
+        tasks[task_id]["progress"] = 80
+        print("[processor] Phase 3: re-rendering video with labels")
+        cap2 = cv2.VideoCapture(video_path)
+        writer2 = _create_video_writer(output_video_path, fps, frame_w, frame_h)
+        for fi, fr_data in enumerate(frame_results):
+            ok2, frame2 = cap2.read()
+            if not ok2:
+                break
+            dets_raw = fr_data.get("detections", [])
+            vis_frame2 = visualizer.draw_frame_boxes_with_labels(frame2, dets_raw, track_labels)
+            writer2.write(vis_frame2)
+        cap2.release()
+        writer2.release()
+        print(f"[processor] Phase 3 done: re-rendered {len(frame_results)} frames")
+
+        summary_detections = []
+        for tid, lbl in track_labels.items():
+            entry: dict[str, str] = {"track_id": str(tid)}
+            num = lbl.get("number", "")
+            bg = lbl.get("bg_color", "")
+            prefix = lbl.get("color_prefix", "")
+            horse_id = (prefix + num) if prefix and num else num
+            entry["horse_id"] = horse_id
+            entry["number"] = num
+            entry["bg_color"] = bg
+            summary_detections.append(entry)
     else:
         summary_detections = _aggregate_detections(frame_results, fps)
 

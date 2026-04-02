@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
-import { Upload, FileVideo, CheckCircle, Loader2, PlayCircle, History, Plus } from 'lucide-vue-next';
+import { useRoute } from 'vue-router';
+import { Upload, FileVideo, CheckCircle, Loader2, PlayCircle, History, Plus, Info, Camera, CameraOff } from 'lucide-vue-next';
 import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_BASE || window.location.origin;
+const route = useRoute();
 
-/** 与后端 MIN_SIMPLE_DISPLAY_FRAMES 一致：网页与视频中仅展示累计达到该帧数的鞍垫号码。 */
-const SIMPLE_DISPLAY_MIN_FRAMES = 25;
+const API_BASE = import.meta.env.VITE_API_BASE || window.location.origin;
 
 const fileInput = ref<HTMLInputElement | null>(null);
 const videoFile = ref<File | null>(null);
@@ -20,27 +20,10 @@ const processingResult = ref<any>(null);
 const taskId = ref<string | null>(null);
 const errorMessage = ref<string>('');
 
-/**
- * 鞍垫号码结果列表（后端已按帧数过滤，此处再兜底解析 confidence 字符串）。
- */
 const simpleDetectionsFiltered = computed(() => {
   const list = processingResult.value?.detections;
   if (!Array.isArray(list)) return [];
-  return list.filter((item: { horse_id?: string; confidence?: string }) => {
-    const n = parseInt(String(item.confidence ?? '0'), 10);
-    return !Number.isNaN(n) && n >= SIMPLE_DISPLAY_MIN_FRAMES;
-  });
-});
-
-const _statusText = computed(() => {
-  switch (processingStatus.value) {
-    case 'idle': return '等待提交';
-    case 'uploading': return '正在上传';
-    case 'processing': return 'AI 处理中';
-    case 'completed': return '分析完成';
-    case 'error': return '任务失败';
-    default: return '未知状态';
-  }
+  return list.filter((item: { horse_id?: string }) => !!item.horse_id);
 });
 
 const handleFileUpload = (event: Event) => {
@@ -144,12 +127,81 @@ const startUpload = async () => {
 
 <template>
   <div class="page-content">
+    <section class="guide-module">
+      <div class="guide-header">
+        <h2 class="guide-title">机位二（通道内部）· 号码识别</h2>
+        <nav class="mode-tabs">
+          <router-link to="/" class="mode-tab" :class="{ active: route.path === '/' }">
+            骑手识别
+          </router-link>
+          <router-link to="/simple" class="mode-tab" :class="{ active: route.path === '/simple' }">
+            号码识别
+          </router-link>
+        </nav>
+      </div>
+
+      <p class="guide-desc">
+        <Info :size="16" class="guide-desc-icon" />
+        上传通道侧向拍摄视频，AI 将自动识别画面中马匹鞍垫上的号码。
+      </p>
+
+      <div class="guide-steps">
+        <div class="step">
+          <span class="step-num">1</span>
+          <span>在下方选择或拖拽视频上传</span>
+        </div>
+        <div class="step-arrow">→</div>
+        <div class="step">
+          <span class="step-num">2</span>
+          <span>点击「开始上传处理」</span>
+        </div>
+        <div class="step-arrow">→</div>
+        <div class="step">
+          <span class="step-num">3</span>
+          <span>右侧查看识别到的鞍垫号码</span>
+        </div>
+      </div>
+
+      <div class="guide-examples">
+        <div class="example good">
+          <img src="/examples/num-good-1.png" alt="清晰侧面" />
+          <div class="example-label">
+            <Camera :size="14" />
+            <span>清晰侧面 · 号码可见</span>
+          </div>
+        </div>
+        <div class="example bad">
+          <img src="/examples/num-bad-1.png" alt="遮挡严重" />
+          <div class="example-label">
+            <CameraOff :size="14" />
+            <span>马匹遮挡 · 号码不可见</span>
+          </div>
+        </div>
+        <div class="example bad">
+          <img src="/examples/num-bad-2.png" alt="光线问题" />
+          <div class="example-label">
+            <CameraOff :size="14" />
+            <span>光线不足 · 画面偏暗</span>
+          </div>
+        </div>
+        <div class="example bad">
+          <img src="/examples/num-bad-3.png" alt="角度不对" />
+          <div class="example-label">
+            <CameraOff :size="14" />
+            <span>拍摄角度偏 · 号码变形</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="guide-notice">
+        ⚠ 要求画面清晰无遮挡 · 建议视频时长 &lt; 20s，文件 &lt; 100MB · 分辨率不低于 1080p
+      </div>
+    </section>
+
     <div class="content-grid">
       <section class="panel preview-panel">
         <div class="panel-header">
           <h2 class="panel-title">视频上传与预览</h2>
-          <p class="requirement-notice">⚠ 要求画面清晰无遮挡</p>
-          <p class="requirement-notice">建议视频时长 &lt; 20s，文件大小 &lt; 100MB <br>视频分辨率不低于1080p </p>
         </div>
 
         <div class="panel-body">
@@ -297,11 +349,11 @@ const startUpload = async () => {
                     class="horse-id-card"
                   >
                     <span class="horse-id-number">{{ item.horse_id }}</span>
-                    <span class="horse-id-conf">检测 {{ item.confidence }} 帧</span>
+                    <span class="horse-id-conf">鞍垫号码</span>
                   </div>
                 </div>
                 <div v-else class="no-detection">
-                  <p>未检测到累计 ≥ {{ SIMPLE_DISPLAY_MIN_FRAMES }} 帧的有效马匹号码</p>
+                  <p>未检测到有效马匹号码</p>
                 </div>
               </div>
 
@@ -350,6 +402,175 @@ const startUpload = async () => {
   max-width: 1400px;
   margin: 0 auto;
   width: 100%;
+}
+
+/* --- guide module --- */
+.guide-module {
+  background-color: #0f111a;
+  border: 1px solid #1e293b;
+  border-radius: 16px;
+  padding: 1.5rem 2rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+}
+
+.guide-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.guide-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: #f1f5f9;
+  margin: 0;
+}
+
+.mode-tabs {
+  display: flex;
+  gap: 0.25rem;
+  background-color: #1e293b;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid #334155;
+}
+
+.mode-tab {
+  padding: 6px 18px;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.2s;
+}
+
+.mode-tab.active {
+  background-color: #6366f1;
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+.mode-tab:not(.active):hover {
+  color: #f1f5f9;
+  background-color: rgba(51, 65, 85, 0.4);
+}
+
+.guide-desc {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  color: #94a3b8;
+  margin: 0 0 1rem 0;
+  line-height: 1.5;
+}
+
+.guide-desc-icon {
+  color: #6366f1;
+  flex-shrink: 0;
+}
+
+.guide-steps {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background-color: rgba(30, 41, 59, 0.5);
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: #e2e8f0;
+}
+
+.step-num {
+  width: 22px;
+  height: 22px;
+  background: linear-gradient(135deg, #6366f1, #4f46e5);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.step-arrow {
+  color: #475569;
+  font-size: 1rem;
+}
+
+.guide-examples {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.example {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 2px solid transparent;
+  transition: all 0.2s;
+}
+
+.example.good {
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.example.bad {
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.example img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  display: block;
+  background-color: #1e293b;
+}
+
+.example-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.example.good .example-label {
+  background-color: rgba(16, 185, 129, 0.1);
+  color: #10b981;
+}
+
+.example.bad .example-label {
+  background-color: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+
+.guide-notice {
+  font-size: 0.8rem;
+  color: #f59e0b;
+  background-color: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.15);
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
+  line-height: 1.5;
 }
 
 .content-grid {
