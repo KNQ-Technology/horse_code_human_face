@@ -10,6 +10,14 @@ import { FileVideo } from 'lucide-vue-next';
           <FileVideo class="logo-icon" :size="24" />
           <h1>赛马识别系统</h1>
         </div>
+        <nav class="nav-tabs">
+          <router-link to="/" class="nav-tab" :class="{ active: route.path === '/' }">
+            完整分析
+          </router-link>
+          <router-link to="/simple" class="nav-tab" :class="{ active: route.path === '/simple' }">
+            鞍垫号码
+          </router-link>
+        </nav>
       </div>
     </header>
 
