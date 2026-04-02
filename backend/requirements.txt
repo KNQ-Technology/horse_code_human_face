@@ -1,16 +1,22 @@
-fastapi
-uvicorn[standard]
-python-multipart
-numpy>=1.24.0,<2.0.0
-setuptools>=65.0.0,<82
+fastapi==0.121.0
+uvicorn[standard]==0.38.0
+python-multipart==0.0.20
+numpy==2.2.6
+setuptools==81.0.0
 opencv-python==4.6.0.66
-ultralytics>=8.2.0
-lap>=0.5.12
-paddleocr>=2.7.0
-paddlepaddle-gpu>=3.3.0    # GPU version; install via: pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
-PyYAML>=6.0.0
-pymilvus[milvus_lite]>=2.3.0
-scikit-image>=0.19.0
-openai>=1.0.0
-onnx
-onnxruntime-gpu>=1.23.0    # GPU version (replaces onnxruntime)
+ultralytics==8.4.21
+lap==0.5.13
+paddleocr==3.4.0
+paddlex==3.4.2
+# CPU baseline used by the recovered backend. On GPU hosts, replace with the
+# matching paddlepaddle-gpu wheel for your CUDA version.
+paddlepaddle==3.2.2
+PyYAML==6.0.2
+pymilvus[milvus_lite]==2.6.9
+scikit-image==0.25.2
+openai==2.7.1
+onnx==1.20.1
+# CPU baseline. Replace with onnxruntime-gpu==1.23.2 when CUDA execution is required.
+onnxruntime==1.23.2
+pytest==9.0.2
+httpx==0.28.1

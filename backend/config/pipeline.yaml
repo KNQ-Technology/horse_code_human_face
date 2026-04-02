@@ -65,7 +65,7 @@ rider_identity:
 
 vlm_fallback:
   enabled: true
-  api_key: "sk-719e95ee5d37494b9951203864312e2d"
+  api_key: ""
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1"
   model: "qwen3.5-plus"
   timeout: 300.0

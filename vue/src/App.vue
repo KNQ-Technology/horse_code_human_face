@@ -1,8 +1,5 @@
 <script setup lang="ts">
 import { FileVideo } from 'lucide-vue-next';
-import { useRoute } from 'vue-router';
-
-const route = useRoute();
 </script>
 
 <template>
@@ -76,39 +73,6 @@ const route = useRoute();
   background: linear-gradient(to right, #fff, #94a3b8);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
-}
-
-.nav-tabs {
-  display: flex;
-  gap: 0.25rem;
-  background-color: #1e293b;
-  padding: 4px;
-  border-radius: 10px;
-  border: 1px solid #334155;
-}
-
-.nav-tab {
-  padding: 6px 18px;
-  border: none;
-  background: transparent;
-  color: #94a3b8;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 0.85rem;
-  font-weight: 600;
-  text-decoration: none;
-  transition: all 0.2s;
-}
-
-.nav-tab.active {
-  background-color: #6366f1;
-  color: #fff;
-  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
-}
-
-.nav-tab:not(.active):hover {
-  color: #f1f5f9;
-  background-color: rgba(51, 65, 85, 0.4);
 }
 
 .main-container {
