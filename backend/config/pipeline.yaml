@@ -5,7 +5,7 @@ detector:
   track_enabled: true
   tracker_name: "bytetrack.yaml"
   track_persist: true
-  device: "cpu"
+  device: "0"
 
 roi:
   x_min_ratio: 0.20
@@ -52,16 +52,20 @@ runtime:
   direction_min_frames: 5
   direction_min_displacement: 30.0
 
+# 骑手人脸：需要 (1) 可用的 Milvus Lite .db 路径 (2) horse_id/models 下 SCRFD/ArcFace ONNX
+# 若 face_db_uri 指向不存在路径（如他人机器上的 /home/...），初始化会失败且整条人脸链路关闭（只保号码 OCR）。
+# Windows：请改为本机 .db，或设置环境变量 FACE_DB_URI；无独显时请 face_device: cpu
 rider_identity:
-  face_db_uri: "/home/hshan/Hor-Peo_detect/rider_old.db"
+  # 相对 backend 目录：仓库根目录的 rider.db
+  face_db_uri: "../rider.db"
   face_collection: "rider_faces"
   face_dim: 512
   face_min_score: 0.3
-  face_device: "cuda"
+  face_device: "cpu"
   face_models_dir: "horse_id/models"
   horse_rider_map: ""
   feature_store_path: "outputs/rider_identity.sqlite"
-  use_feature_store: false
+  use_feature_store: true
 
 vlm_fallback:
   enabled: true
@@ -72,7 +76,10 @@ vlm_fallback:
   max_retries: 1
   cooldown_frames: 15
 
+# 简化模式 Phase2：对裁剪图调 DashScope 兼容接口，必须用支持图像的多模态模型。
+# 若填纯文本模型(如部分 qwen3.5-plus 路由)，API 会报错或无法解析号码，画面上全部为「?」。
 vlm_video:
+  model: "qwen-vl-max"
   segment_seconds: 15
   overlap_seconds: 3
   compress_crf: 28

@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import { Upload, FileVideo, CheckCircle, Loader2, PlayCircle, History, Plus } from 'lucide-vue-next';
+import { useRoute } from 'vue-router';
+import { Upload, FileVideo, CheckCircle, Loader2, PlayCircle, History, Plus, Info, Camera, CameraOff } from 'lucide-vue-next';
 import axios from 'axios';
 
-const API_BASE = import.meta.env.VITE_API_BASE || `${window.location.protocol}//${window.location.hostname}:8001`;
+const route = useRoute();
+const API_BASE = import.meta.env.VITE_API_BASE || window.location.origin;
 
 const fileInput = ref<HTMLInputElement | null>(null);
 const videoFile = ref<File | null>(null);
@@ -12,10 +14,11 @@ const processedVideoUrl = ref<string | null>(null);
 const videoMode = ref<'original' | 'processed'>('original');
 const uploadProgress = ref(0);
 const processingProgress = ref(0);
-const processingStatus = ref<'idle' | 'uploading' | 'processing' | 'completed' | 'error'>('idle');
+const processingStatus = ref<'idle' | 'uploading' | 'queued' | 'processing' | 'completed' | 'error'>('idle');
 const processingResult = ref<any>(null);
 const taskId = ref<string | null>(null);
 const errorMessage = ref<string>('');
+const queuePosition = ref(0);
 
 const handleFileUpload = (event: Event) => {
   const target = event.target as HTMLInputElement;
@@ -54,6 +57,10 @@ const checkStatus = async () => {
         processingResult.value = data.result;
       } else if (data.status === 'error') {
         errorMessage.value = data.message || '后端处理时出错';
+      } else if (data.status === 'queued') {
+        queuePosition.value = data.queue_position ?? 0;
+        processingStatus.value = 'queued';
+        setTimeout(checkStatus, 2000);
       } else if (data.status === 'processing' || data.status === 'uploading') {
         setTimeout(checkStatus, 1000);
       }
@@ -84,6 +91,7 @@ const resetUpload = () => {
   processingResult.value = null;
   taskId.value = null;
   errorMessage.value = '';
+  queuePosition.value = 0;
 };
 
 const startUpload = async () => {
@@ -117,6 +125,80 @@ const startUpload = async () => {
 
 <template>
   <div class="page-content">
+    <section class="guide-module">
+      <div class="guide-header">
+        <h2 class="guide-title">机位一（通道出口）· 骑手识别</h2>
+        <nav class="mode-tabs">
+          <router-link to="/" class="mode-tab" :class="{ active: route.path === '/' }">
+            骑手识别
+          </router-link>
+          <router-link to="/face" class="mode-tab" :class="{ active: route.path === '/face' }">
+            仅人脸
+          </router-link>
+          <router-link to="/simple" class="mode-tab" :class="{ active: route.path === '/simple' }">
+            号码识别
+          </router-link>
+        </nav>
+      </div>
+
+      <p class="guide-desc">
+        <Info :size="16" class="guide-desc-icon" />
+        上传通道出口拍摄视频，AI 将识别已录入骑手身份（人脸匹配）。
+      </p>
+
+      <div class="guide-steps">
+        <div class="step">
+          <span class="step-num">1</span>
+          <span>在下方选择或拖拽视频上传</span>
+        </div>
+        <div class="step-arrow">→</div>
+        <div class="step">
+          <span class="step-num">2</span>
+          <span>点击「开始上传处理」</span>
+        </div>
+        <div class="step-arrow">→</div>
+        <div class="step">
+          <span class="step-num">3</span>
+          <span>右侧查看完整分析结果</span>
+        </div>
+      </div>
+
+      <div class="guide-examples guide-examples-4">
+        <div class="example good">
+          <img src="/examples/face-good-1.png" alt="正面清晰" />
+          <div class="example-label">
+            <Camera :size="14" />
+            <span>正面角度 · 光线充足</span>
+          </div>
+        </div>
+        <div class="example bad">
+          <img src="/examples/face-bad-1.png" alt="画面模糊" />
+          <div class="example-label">
+            <CameraOff :size="14" />
+            <span>画面模糊 · 无法辨认</span>
+          </div>
+        </div>
+        <div class="example bad">
+          <img src="/examples/face-bad-2.png" alt="半边人脸" />
+          <div class="example-label">
+            <CameraOff :size="14" />
+            <span>面部不完整 · 识别失败</span>
+          </div>
+        </div>
+        <div class="example bad">
+          <img src="/examples/face-bad-3.png" alt="有遮挡" />
+          <div class="example-label">
+            <CameraOff :size="14" />
+            <span>面部遮挡 · 无法匹配</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="guide-notice">
+        ⚠ 要求画面清晰无遮挡 · 建议视频时长 &lt; 20s，文件 &lt; 100MB · 完整分析处理时间较长，请耐心等待
+      </div>
+    </section>
+
     <div class="content-grid">
       <section class="panel preview-panel">
         <div class="panel-header">
@@ -203,6 +285,10 @@ const startUpload = async () => {
               <Plus :size="20" />
               <span>上传新视频</span>
             </template>
+            <template v-else-if="processingStatus === 'queued'">
+              <Loader2 class="animate-spin" :size="20" />
+              <span>排队中{{ queuePosition > 0 ? `，前方还有 ${queuePosition} 个任务` : '，即将开始' }}...</span>
+            </template>
             <template v-else>
               <Loader2 class="animate-spin" :size="20" />
               <span>正在执行 AI 分析...</span>
@@ -264,7 +350,6 @@ const startUpload = async () => {
                   <thead>
                     <tr>
                       <th>时间</th>
-                      <th>编号</th>
                       <th>目标名称</th>
                       <th>置信度</th>
                     </tr>
@@ -272,7 +357,6 @@ const startUpload = async () => {
                   <tbody>
                     <tr v-for="(item, index) in processingResult.detections" :key="index">
                       <td>{{ item.timestamp }}</td>
-                      <td><span class="id-badge">{{ item.horse_id }}</span></td>
                       <td>{{ item.person_name }}</td>
                       <td class="conf-cell">{{ item.confidence }}</td>
                     </tr>
@@ -308,8 +392,9 @@ const startUpload = async () => {
                 <div class="pulse-ring"></div>
                 <Loader2 class="animate-spin" :size="40" />
               </div>
-              <h3>{{ processingStatus === 'uploading' ? '正在同步文件...' : '后端正在分析...' }}</h3>
-              <p>这可能需要几十秒钟，请稍候</p>
+              <h3>{{ processingStatus === 'uploading' ? '正在同步文件...' : processingStatus === 'queued' ? '排队等待中...' : '后端正在分析...' }}</h3>
+              <p v-if="processingStatus === 'queued'">{{ queuePosition > 0 ? `当前排在第 ${queuePosition + 1} 位，请耐心等待` : '即将开始处理' }}</p>
+              <p v-else>这可能需要几十秒钟，请稍候</p>
             </div>
           </div>
         </div>
@@ -319,6 +404,175 @@ const startUpload = async () => {
 </template>
 
 <style scoped>
+/* --- guide module --- */
+.guide-module {
+  background-color: #0f111a;
+  border: 1px solid #1e293b;
+  border-radius: 16px;
+  padding: 1.5rem 2rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4);
+}
+
+.guide-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 1rem;
+}
+
+.guide-title {
+  font-size: 1.2rem;
+  font-weight: 700;
+  color: #f1f5f9;
+  margin: 0;
+}
+
+.mode-tabs {
+  display: flex;
+  gap: 0.25rem;
+  background-color: #1e293b;
+  padding: 4px;
+  border-radius: 10px;
+  border: 1px solid #334155;
+}
+
+.mode-tab {
+  padding: 6px 18px;
+  border: none;
+  background: transparent;
+  color: #94a3b8;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: all 0.2s;
+}
+
+.mode-tab.active {
+  background-color: #6366f1;
+  color: #fff;
+  box-shadow: 0 4px 12px rgba(99, 102, 241, 0.3);
+}
+
+.mode-tab:not(.active):hover {
+  color: #f1f5f9;
+  background-color: rgba(51, 65, 85, 0.4);
+}
+
+.guide-desc {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.9rem;
+  color: #94a3b8;
+  margin: 0 0 1rem 0;
+  line-height: 1.5;
+}
+
+.guide-desc-icon {
+  color: #6366f1;
+  flex-shrink: 0;
+}
+
+.guide-steps {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1.25rem;
+  flex-wrap: wrap;
+}
+
+.step {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  background-color: rgba(30, 41, 59, 0.5);
+  padding: 0.5rem 1rem;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  color: #e2e8f0;
+}
+
+.step-num {
+  width: 22px;
+  height: 22px;
+  background: linear-gradient(135deg, #6366f1, #4f46e5);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: #fff;
+  flex-shrink: 0;
+}
+
+.step-arrow {
+  color: #475569;
+  font-size: 1rem;
+}
+
+.guide-examples {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.example {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 2px solid transparent;
+  transition: all 0.2s;
+}
+
+.example.good {
+  border-color: rgba(16, 185, 129, 0.3);
+}
+
+.example.bad {
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+.example img {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  display: block;
+  background-color: #1e293b;
+}
+
+.example-label {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.4rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.example.good .example-label {
+  background-color: rgba(16, 185, 129, 0.1);
+  color: #10b981;
+}
+
+.example.bad .example-label {
+  background-color: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}
+
+.guide-notice {
+  font-size: 0.8rem;
+  color: #f59e0b;
+  background-color: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.15);
+  border-radius: 8px;
+  padding: 0.6rem 1rem;
+  line-height: 1.5;
+}
+
 .page-content {
   flex: 1;
   padding: 2rem;

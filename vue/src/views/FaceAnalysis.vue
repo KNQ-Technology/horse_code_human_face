@@ -1,11 +1,10 @@
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref } from 'vue';
 import { useRoute } from 'vue-router';
 import { Upload, FileVideo, CheckCircle, Loader2, PlayCircle, History, Plus, Info, Camera, CameraOff } from 'lucide-vue-next';
 import axios from 'axios';
 
 const route = useRoute();
-
 const API_BASE = import.meta.env.VITE_API_BASE || window.location.origin;
 
 const fileInput = ref<HTMLInputElement | null>(null);
@@ -20,12 +19,6 @@ const processingResult = ref<any>(null);
 const taskId = ref<string | null>(null);
 const errorMessage = ref<string>('');
 const queuePosition = ref(0);
-
-const simpleDetectionsFiltered = computed(() => {
-  const list = processingResult.value?.detections;
-  if (!Array.isArray(list)) return [];
-  return list.filter((item: { horse_id?: string }) => !!item.horse_id);
-});
 
 const handleFileUpload = (event: Event) => {
   const target = event.target as HTMLInputElement;
@@ -109,7 +102,7 @@ const startUpload = async () => {
 
   const formData = new FormData();
   formData.append('video', videoFile.value);
-  formData.append('mode', 'simple');
+  formData.append('mode', 'face');
 
   try {
     const response = await axios.post(`${API_BASE}/api/upload`, formData, {
@@ -135,7 +128,7 @@ const startUpload = async () => {
   <div class="page-content">
     <section class="guide-module">
       <div class="guide-header">
-        <h2 class="guide-title">机位二（通道内部）· 号码识别</h2>
+        <h2 class="guide-title">机位一 · 仅人脸识别</h2>
         <nav class="mode-tabs">
           <router-link to="/" class="mode-tab" :class="{ active: route.path === '/' }">
             骑手识别
@@ -151,7 +144,7 @@ const startUpload = async () => {
 
       <p class="guide-desc">
         <Info :size="16" class="guide-desc-icon" />
-        上传通道侧向拍摄视频，AI 将自动识别画面中马匹鞍垫上的号码。
+        不进行鞍垫号码 / OCR / VLM，仅 YOLO 追踪 + 人脸检索；适合只看骑师是谁的场景。
       </p>
 
       <div class="guide-steps">
@@ -167,43 +160,43 @@ const startUpload = async () => {
         <div class="step-arrow">→</div>
         <div class="step">
           <span class="step-num">3</span>
-          <span>右侧查看识别到的鞍垫号码</span>
+          <span>右侧查看完整分析结果</span>
         </div>
       </div>
 
-      <div class="guide-examples">
+      <div class="guide-examples guide-examples-4">
         <div class="example good">
-          <img src="/examples/num-good-1.png" alt="清晰侧面" />
+          <img src="/examples/face-good-1.png" alt="正面清晰" />
           <div class="example-label">
             <Camera :size="14" />
-            <span>清晰侧面 · 号码可见</span>
+            <span>正面角度 · 光线充足</span>
           </div>
         </div>
         <div class="example bad">
-          <img src="/examples/num-bad-1.png" alt="遮挡严重" />
+          <img src="/examples/face-bad-1.png" alt="画面模糊" />
           <div class="example-label">
             <CameraOff :size="14" />
-            <span>马匹遮挡 · 号码不可见</span>
+            <span>画面模糊 · 无法辨认</span>
           </div>
         </div>
         <div class="example bad">
-          <img src="/examples/num-bad-2.png" alt="光线问题" />
+          <img src="/examples/face-bad-2.png" alt="半边人脸" />
           <div class="example-label">
             <CameraOff :size="14" />
-            <span>光线不足 · 画面偏暗</span>
+            <span>面部不完整 · 识别失败</span>
           </div>
         </div>
         <div class="example bad">
-          <img src="/examples/num-bad-3.png" alt="角度不对" />
+          <img src="/examples/face-bad-3.png" alt="有遮挡" />
           <div class="example-label">
             <CameraOff :size="14" />
-            <span>拍摄角度偏 · 号码变形</span>
+            <span>面部遮挡 · 无法匹配</span>
           </div>
         </div>
       </div>
 
       <div class="guide-notice">
-        ⚠ 要求画面清晰无遮挡 · 建议视频时长 &lt; 20s，文件 &lt; 100MB · 分辨率不低于 1080p
+        ⚠ 要求画面清晰无遮挡 · 建议视频时长 &lt; 20s，文件 &lt; 100MB · 完整分析处理时间较长，请耐心等待
       </div>
     </section>
 
@@ -307,7 +300,7 @@ const startUpload = async () => {
 
       <section class="panel status-panel">
         <div class="panel-header">
-          <h2 class="panel-title">鞍垫号码识别结果</h2>
+          <h2 class="panel-title">处理状态与结果</h2>
         </div>
 
         <div class="panel-body">
@@ -339,7 +332,7 @@ const startUpload = async () => {
             <div v-if="processingStatus === 'completed'" class="result-content-wrapper">
               <div class="success-banner">
                 <CheckCircle class="success-icon" :size="20" />
-                <span>鞍垫号码识别完成</span>
+                <span>分析任务已完成</span>
               </div>
 
               <div class="metadata-grid">
@@ -353,21 +346,23 @@ const startUpload = async () => {
                 </div>
               </div>
 
-              <div class="horse-id-section">
-                <h3 class="section-title">检测到的马匹号码</h3>
-                <div v-if="simpleDetectionsFiltered.length > 0" class="horse-id-grid">
-                  <div
-                    v-for="(item, index) in simpleDetectionsFiltered"
-                    :key="index"
-                    class="horse-id-card"
-                  >
-                    <span class="horse-id-number">{{ item.horse_id }}</span>
-                    <span class="horse-id-conf">鞍垫号码</span>
-                  </div>
-                </div>
-                <div v-else class="no-detection">
-                  <p>未检测到有效马匹号码</p>
-                </div>
+              <div class="table-container">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>目标名称</th>
+                      <th>置信度</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(item, index) in processingResult.detections" :key="index">
+                      <td>{{ item.timestamp }}</td>
+                      <td>{{ item.person_name }}</td>
+                      <td class="conf-cell">{{ item.confidence }}</td>
+                    </tr>
+                  </tbody>
+                </table>
               </div>
 
               <details class="json-details">
@@ -410,14 +405,6 @@ const startUpload = async () => {
 </template>
 
 <style scoped>
-.page-content {
-  flex: 1;
-  padding: 2rem;
-  max-width: 1400px;
-  margin: 0 auto;
-  width: 100%;
-}
-
 /* --- guide module --- */
 .guide-module {
   background-color: #0f111a;
@@ -585,6 +572,14 @@ const startUpload = async () => {
   border-radius: 8px;
   padding: 0.6rem 1rem;
   line-height: 1.5;
+}
+
+.page-content {
+  flex: 1;
+  padding: 2rem;
+  max-width: 1400px;
+  margin: 0 auto;
+  width: 100%;
 }
 
 .content-grid {
@@ -887,68 +882,45 @@ const startUpload = async () => {
   word-break: break-all;
 }
 
-/* --- horse id cards (replaces table) --- */
-.horse-id-section {
+.table-container {
+  border-radius: 12px;
+  border: 1px solid #1e293b;
+  background-color: #0a0c12;
+  overflow: hidden;
   margin-bottom: 1.5rem;
 }
 
-.section-title {
-  font-size: 0.9rem;
-  font-weight: 600;
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.data-table th {
+  background-color: #141b2d;
+  text-align: left;
+  padding: 12px;
   color: #94a3b8;
-  margin: 0 0 0.35rem 0;
+  font-weight: 600;
+  border-bottom: 1px solid #1e293b;
 }
 
-.section-hint {
-  font-size: 0.75rem;
-  color: #64748b;
-  margin: 0 0 1rem 0;
-  line-height: 1.4;
+.data-table td {
+  padding: 12px;
+  border-bottom: 1px solid #1e293b;
 }
 
-.horse-id-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.75rem;
-}
-
-.horse-id-card {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 0.4rem;
-  padding: 1rem 1.5rem;
-  background-color: #0a0c12;
-  border: 1px solid #1e293b;
-  border-radius: 12px;
-  min-width: 100px;
-  transition: all 0.2s;
-}
-
-.horse-id-card:hover {
-  border-color: #6366f1;
-  background-color: #111420;
-}
-
-.horse-id-number {
-  font-size: 1.4rem;
-  font-weight: 700;
-  font-family: monospace;
+.id-badge {
+  background-color: #1e293b;
   color: #6366f1;
-  letter-spacing: 0.05em;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: monospace;
 }
 
-.horse-id-conf {
-  font-size: 0.7rem;
+.conf-cell {
   color: #10b981;
   font-family: monospace;
-}
-
-.no-detection {
-  text-align: center;
-  padding: 2rem 1rem;
-  color: #64748b;
-  font-size: 0.9rem;
 }
 
 .json-details summary {

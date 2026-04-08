@@ -4,7 +4,9 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
+from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -27,12 +29,41 @@ from horse_id.vlm_fallback import VLMFallback
 from horse_id.vlm_video import VLMVideoIdentifier, VLMVideoConfig
 
 
+def _step_ts() -> str:
+    return time.strftime("%Y-%m-%d %H:%M:%S")
+
+
 class _FFmpegWriter:
-    """Video writer that pipes raw frames to FFmpeg for H.264 encoding."""
+    """Video writer that pipes raw frames to FFmpeg for H.264 encoding.
+
+    FFmpeg 会把大量进度与统计写到 stderr。若使用 stderr=PIPE 却不持续读取，
+    管道缓冲区满后 FFmpeg 会阻塞，进而无法再读 stdin，表现为 release()/wait()
+    永远挂起。Windows 管道缓冲通常更小，更容易触发；Linux 长视频同样可能踩中。
+    因此必须在子进程运行期间排空 stderr（后台线程），而不是等到 wait() 后再读。
+    """
 
     def __init__(self, proc: subprocess.Popen[bytes], output_path: str) -> None:
         self._proc = proc
         self._output_path = output_path
+        self._stderr_tail = bytearray()
+        self._stderr_thread: threading.Thread | None = None
+        if proc.stderr is not None:
+            err = proc.stderr
+
+            def _drain_stderr() -> None:
+                try:
+                    while True:
+                        chunk = err.read(65536)
+                        if not chunk:
+                            break
+                        if len(self._stderr_tail) > 16384:
+                            del self._stderr_tail[:-8192]
+                        self._stderr_tail.extend(chunk)
+                except Exception:
+                    pass
+
+            self._stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+            self._stderr_thread.start()
 
     def isOpened(self) -> bool:
         return self._proc.stdin is not None and self._proc.poll() is None
@@ -48,11 +79,15 @@ class _FFmpegWriter:
     def release(self) -> None:
         if self._proc.stdin:
             self._proc.stdin.close()
+        _wait0 = time.perf_counter()
         self._proc.wait()
+        if self._stderr_thread is not None:
+            self._stderr_thread.join(timeout=30.0)
+        _wait_dt = time.perf_counter() - _wait0
+        if _wait_dt > 0.5:
+            print(f"[STEP] FFmpeg 子进程 wait 结束 | {_step_ts()} | 耗时={_wait_dt:.2f}s (编码收尾)")
         if self._proc.returncode != 0:
-            stderr_tail = ""
-            if self._proc.stderr:
-                stderr_tail = self._proc.stderr.read().decode(errors="replace")[-500:]
+            stderr_tail = bytes(self._stderr_tail)[-800:].decode(errors="replace")
             print(f"[video] FFmpeg exited with code {self._proc.returncode}: {stderr_tail}")
 
 
@@ -74,7 +109,12 @@ def _create_video_writer(
                 raise RuntimeError("No H.264 encoder found in FFmpeg")
 
             cmd: list[str] = [
-                ffmpeg_bin, "-y",
+                ffmpeg_bin,
+                "-y",
+                "-hide_banner",
+                "-loglevel",
+                "warning",
+                "-nostats",
                 "-f", "rawvideo",
                 "-vcodec", "rawvideo",
                 "-s", f"{width}x{height}",
@@ -326,6 +366,54 @@ def _aggregate_detections_simple(
     ]
 
 
+def _aggregate_detections_face_only(
+    frame_results: list[dict[str, Any]], fps: float
+) -> list[dict[str, str]]:
+    """按轨迹汇总人脸匹配结果（无 OCR / 马号）。"""
+    track_votes: dict[int, list[tuple[str, float]]] = {}
+    track_best_frame: dict[int, int] = {}
+    track_best_conf: dict[int, float] = {}
+
+    for fr in frame_results:
+        fi = int(fr.get("frame_index", 0))
+        for det in fr.get("detections", []):
+            tid = det.get("track_id")
+            if tid is None:
+                continue
+            tid = int(tid)
+            rider = det.get("rider_identity", {})
+            name = str(rider.get("name", "")).strip()
+            matched = bool(rider.get("matched", False))
+            score = float(rider.get("score", 0.0))
+            hconf = float(det.get("conf", 0.0))
+            if tid not in track_votes:
+                track_votes[tid] = []
+                track_best_conf[tid] = 0.0
+                track_best_frame[tid] = fi
+            if name and matched:
+                track_votes[tid].append((name, score))
+            if hconf > track_best_conf[tid]:
+                track_best_conf[tid] = hconf
+                track_best_frame[tid] = fi
+
+    results: list[dict[str, str]] = []
+    for tid in sorted(track_votes.keys()):
+        votes = track_votes[tid]
+        if len(votes) < MIN_FACE_FRAMES_FOR_RIDER:
+            continue
+        top_name, _cnt = Counter(n for n, _ in votes).most_common(1)[0]
+        sub = [s for n, s in votes if n == top_name]
+        avg_score = sum(sub) / len(sub) if sub else 0.0
+        bf = track_best_frame[tid]
+        results.append({
+            "timestamp": _frame_to_timestamp(bf, fps),
+            "horse_id": "",
+            "person_name": top_name,
+            "confidence": f"{track_best_conf[tid]:.2f}_{avg_score:.2f}",
+        })
+    return results
+
+
 def process_video(
     task_id: str,
     video_path: str,
@@ -337,11 +425,17 @@ def process_video(
     """Run the detection pipeline on an uploaded video.
 
     Args:
-        mode: "full" for complete pipeline, "simple" for VLM saddle-pad only.
+        mode: "full" 全流程；"simple" 仅 VLM 鞍垫号码；"face" 仅检测+追踪+人脸（无 OCR/VLM）。
 
     Returns a result dict matching the frontend API format.
     """
     is_simple = mode == "simple"
+    is_face_only = mode == "face"
+    _init_t0 = time.perf_counter()
+    print(
+        f"[STEP] 开始: 初始化管线(配置/检测器/OCR/人脸等) | {_step_ts()} | "
+        f"task={task_id[:8]} mode={mode} file={os.path.basename(video_path)}"
+    )
     config = load_config(config_path)
     config.runtime.input_video = video_path
     config.runtime.output_video = output_video_path
@@ -361,11 +455,12 @@ def process_video(
 
     if not is_simple:
         roi_extractor = ROIExtractor(config.roi)
-        enhancer = ROIEnhancer(config.enhance)
-        ocr_engine = OCREngine(config.ocr, device="gpu:0")
+        if not is_face_only:
+            enhancer = ROIEnhancer(config.enhance)
+            ocr_engine = OCREngine(config.ocr, device="gpu:0")
 
     vlm_fallback: VLMFallback | None = None
-    if not is_simple:
+    if not is_simple and not is_face_only:
         if config.vlm_fallback and config.vlm_fallback.enabled and config.vlm_fallback.api_key:
             vlm_cfg = config.vlm_fallback
             vlm_fallback = VLMFallback(vlm_cfg)
@@ -376,9 +471,9 @@ def process_video(
     viz_mode = config.runtime.viz_mode if config.runtime.viz_mode else "display"
     print(f"[viz] mode={viz_mode}  pipeline_mode={mode}")
     track_fuser = OCRTrackFuser(config.fusion)
-    hide_numbers = mode == "full"
+    hide_numbers = mode in ("full", "face")
 
-    if not is_simple:
+    if not is_simple and not is_face_only:
         direction_filter = DirectionFilter(
             target_direction=config.runtime.target_direction,
             min_frames=config.runtime.direction_min_frames,
@@ -432,6 +527,11 @@ def process_video(
     if not writer.isOpened():
         raise ValueError(f"Cannot create output video: {output_video_path}")
 
+    print(
+        f"[STEP] 结束: 初始化管线 | {_step_ts()} | 耗时={time.perf_counter() - _init_t0:.2f}s | "
+        f"resolution={resolution_str} total_frames≈{total_frames}"
+    )
+
     frame_results: list[dict[str, Any]] = []
     frame_idx = 0
     start_ts = time.perf_counter()
@@ -443,8 +543,27 @@ def process_video(
         "ocr": 0.0, "vlm": 0.0, "rider_id": 0.0, "viz": 0.0, "write": 0.0,
     }
 
+    # 记录各阶段运行设备
+    _yolo_dev = str(getattr(config.detector, "device", "cpu")).lower()
+    _yolo_device = "GPU" if any(k in _yolo_dev for k in ("cuda", "gpu", "0", "1", "2", "3")) else "CPU"
+    _ocr_device = "GPU" if ocr_engine is not None else "CPU"  # OCREngine 用 gpu:0
+    _face_dev = str(getattr(config.rider_identity_settings, "face_device", "cpu") if config.rider_identity_settings else "cpu").lower()
+    _face_device = "GPU" if any(k in _face_dev for k in ("cuda", "gpu", "0", "1", "2", "3")) else "CPU"
+    _stage_devices: dict[str, str] = {
+        "read": "CPU", "yolo": _yolo_device, "face_det": _face_device,
+        "enhance": "CPU", "ocr": _ocr_device, "vlm": "API",
+        "rider_id": _face_device, "viz": "CPU", "write": "CPU",
+    }
+
     tasks[task_id]["message"] = "正在初始化 AI 模型..."
     tasks[task_id]["progress"] = 1
+    tasks[task_id]["stage_devices"] = _stage_devices
+
+    _loop_t0 = time.perf_counter()
+    print(
+        f"[STEP] 开始: 逐帧处理主循环 | {_step_ts()} | task={task_id[:8]} "
+        f"(全功能进度条 0–97% 对应该阶段)"
+    )
 
     while True:
         _t0 = time.perf_counter()
@@ -454,7 +573,7 @@ def process_video(
         _t_accum["read"] += time.perf_counter() - _t0
 
         _t0 = time.perf_counter()
-        if not is_simple:
+        if not is_simple and not is_face_only:
             track_state.begin_frame()
         detections = detector.detect(frame)
         _t_accum["yolo"] += time.perf_counter() - _t0
@@ -495,7 +614,74 @@ def process_video(
                             best_crops[det.track_id] = (crop, area)
                 continue
 
+            if is_face_only:
+                assert roi_extractor is not None and rider_identity is not None
+                vis_detections.append(det)
+                roi = roi_extractor.build_roi(det=det, frame_w=cur_w, frame_h=cur_h)
+                vis_rois.append(roi)
+                _tr0 = time.perf_counter()
+                rider_payload = rider_identity.identify(det=det, ocr_fused_payload=None)
+                _t_accum["rider_id"] += time.perf_counter() - _tr0
+                empty_fused = {
+                    "stable_id": "",
+                    "stable_conf": 0.0,
+                    "vote_ratio": 0.0,
+                    "support_count": 0,
+                    "sample_count": 0,
+                    "ready": False,
+                }
+                empty_state = {
+                    "status": "UNCONFIRMED",
+                    "stable_id": "",
+                    "bad_frame_count": 0,
+                    "lost_frame_count": 0,
+                    "hold_left_frames": 0,
+                }
+                zero_quality = {
+                    "score": 0.0, "sharpness": 0.0, "brightness": 0.0, "contrast": 0.0,
+                }
+                ocr_infos.append({
+                    "track_id": det.track_id,
+                    "text": "",
+                    "conf": 0.0,
+                    "valid": False,
+                    "ocr_source": "disabled",
+                    "stable_id": "",
+                    "stable_ready": False,
+                    "state": "UNCONFIRMED",
+                    "state_id": "",
+                    "rider_name": rider_payload["name"],
+                    "rider_score": rider_payload["score"],
+                    "rider_matched": rider_payload["matched"],
+                    "rider_source": rider_payload.get("source", "none"),
+                    "rider_code": rider_payload.get("rider_code", ""),
+                    "rider_status": rider_payload.get("rider_status", ""),
+                    "rider_new": rider_payload.get("is_new_rider", False),
+                    "face_bbox": rider_payload.get("face_bbox", []),
+                    "face_score": rider_payload.get("face_score", 0.0),
+                    "face_detected": rider_payload.get("face_detected", False),
+                    "horse_id": rider_payload.get("horse_id", ""),
+                    "vlm_bg": "",
+                    "vlm_font": "",
+                    "vlm_number": "",
+                    "vlm_prefix": "",
+                    "vlm_full_id": "",
+                })
+                item = {
+                    **asdict(det),
+                    "roi_bbox": roi_extractor.serialize(roi),
+                    "roi_quality": zero_quality,
+                    "ocr": {"text": "", "conf": 0.0, "valid": False, "raw_text": ""},
+                    "ocr_runtime": {"source": "face_only", "interval_frames": 0},
+                    "ocr_fused": empty_fused,
+                    "track_state": empty_state,
+                    "rider_identity": rider_payload,
+                }
+                det_with_roi.append(item)
+                continue
+
             # --- full mode: direction filter → ROI → enhance → OCR → VLM fallback → rider ---
+            assert direction_filter is not None
             direction_filter.update(det.track_id, det.x)
             if not direction_filter.should_process(det.track_id):
                 continue
@@ -639,7 +825,7 @@ def process_video(
                 frame=frame, detections=vis_detections, rois=vis_rois, ocr_infos=ocr_infos,
                 unmatched_faces=rider_identity.unmatched_faces if show_unmatched else None,
             )
-        if viz_mode == "debug" and not is_simple and not hide_numbers:
+        if viz_mode == "debug" and not is_simple and not is_face_only and not hide_numbers:
             vis_frame = visualizer.draw_roi_comparison_panel(
                 frame=vis_frame,
                 roi_original_bgr=first_roi_raw,
@@ -656,22 +842,67 @@ def process_video(
         _t_accum["write"] += time.perf_counter() - _tw0
 
         frame_results.append({"frame_index": frame_idx, "detections": det_with_roi})
-        if not is_simple:
+        if not is_simple and not is_face_only:
             track_state.end_frame()
         frame_idx += 1
 
+        # 简化模式 Phase1 只占 0–55%，避免结束后跳回 60% 造成进度倒退；全功能模式占 0–97%，为收尾与保存留出区间
         if total_frames > 0:
-            progress = min(99, int(frame_idx / total_frames * 100))
+            if is_simple:
+                progress = min(55, int(frame_idx / total_frames * 55))
+            else:
+                progress = min(97, int(frame_idx / total_frames * 97))
         else:
-            progress = min(99, frame_idx)
+            progress = min(55 if is_simple else 97, frame_idx)
         tasks[task_id]["progress"] = progress
         tasks[task_id]["message"] = f"正在进行 AI 识别... {progress}%"
 
+        # 每 10 帧更新一次 profiling 数据供前端实时展示
+        if frame_idx % 10 == 0:
+            _elapsed = time.perf_counter() - start_ts
+            if _elapsed > 0:
+                _prof = {}
+                for _pk, _pv in _t_accum.items():
+                    _prof[_pk] = round(_pv / _elapsed * 100, 1)
+                _prof_sum = sum(_t_accum.values())
+                _prof["other"] = round(max(0, _elapsed - _prof_sum) / _elapsed * 100, 1)
+                tasks[task_id]["profiling"] = _prof
+
+    # Phase: 帧循环结束，开始收尾
+    print(
+        f"[STEP] 结束: 逐帧处理主循环 | {_step_ts()} | "
+        f"耗时={time.perf_counter() - _loop_t0:.2f}s | frames={frame_idx}"
+    )
+
+    _cap_t0 = time.perf_counter()
+    print(f"[STEP] 开始: cap.release | {_step_ts()}")
     cap.release()
+    print(f"[STEP] 结束: cap.release | {_step_ts()} | 耗时={time.perf_counter() - _cap_t0:.3f}s")
+
+    _wr_t0 = time.perf_counter()
+    print(f"[STEP] 开始: writer.release (含 FFmpeg 管道收尾，可能较慢) | {_step_ts()}")
     writer.release()
+    print(f"[STEP] 结束: writer.release | {_step_ts()} | 耗时={time.perf_counter() - _wr_t0:.2f}s")
+
+    if is_simple:
+        tasks[task_id]["message"] = "正在筛选轨迹与准备 VLM..."
+        tasks[task_id]["progress"] = 55
+        print(f"[STEP] 开始: 简化模式 Phase1 后筛选轨迹 | {_step_ts()}")
+    else:
+        tasks[task_id]["message"] = "视频帧处理完成，正在统计与汇总..."
+        tasks[task_id]["progress"] = 98
+        print(f"[STEP] 阶段: profiling 与后续汇总/保存 | {_step_ts()} (全功能进度 98%→100%)")
 
     total_elapsed = max(1e-6, time.perf_counter() - start_ts)
     print(f"[processor] frames={frame_idx} elapsed={total_elapsed:.2f}s avg_fps={frame_idx / total_elapsed:.2f}")
+
+    # 最终 profiling 写入 task
+    _final_prof = {}
+    for _pk, _pv in _t_accum.items():
+        _final_prof[_pk] = round(_pv / total_elapsed * 100, 1)
+    _prof_sum = sum(_t_accum.values())
+    _final_prof["other"] = round(max(0, total_elapsed - _prof_sum) / total_elapsed * 100, 1)
+    tasks[task_id]["profiling"] = _final_prof
 
     print("\n" + "=" * 60)
     print("[profiling] 各模块累计耗时 (秒 / 占比)")
@@ -723,10 +954,12 @@ def process_video(
                 del best_crops[tid]
         num_horses = len(best_crops)
         print(f"[processor] Phase 1 done: {before} tracks detected, {num_horses} kept after filter (>= {_MIN_TRACK_FRAMES} frames)")
+        print(f"[STEP] 结束: 简化模式轨迹筛选 | {_step_ts()} | 保留马匹数={num_horses}")
 
         tasks[task_id]["message"] = "YOLO 检测完成，开始逐马 VLM 识别..."
         tasks[task_id]["progress"] = 60
-        print("[processor] Phase 2: per-track crop VLM identification")
+        _vlm_t0 = time.perf_counter()
+        print(f"[STEP] 开始: Phase2 VLM 逐马识别 | {_step_ts()} | crops={len(best_crops)}")
         vlm_video_cfg_data = config.vlm_video
         if vlm_video_cfg_data is None:
             vlm_video_cfg_data = VLMVideoConfig()
@@ -738,15 +971,28 @@ def process_video(
                 best_crops, tasks=tasks, task_id=task_id,
             )
             print(f"[processor] VLM per-track results: {track_labels}")
+            if num_horses > 0 and len(track_labels) == 0:
+                print(
+                    "[processor] WARNING: VLM 未识别到任何鞍垫号码(画面将显示「?」)."
+                    " 请检查: 1) api_key 与网络 2) vlm_video.model 是否为多模态(如 qwen-vl-max)"
+                    " 3) 后端日志中 [vlm_video] track N API 调用失败 行"
+                )
         else:
             print("[processor] WARNING: no api_key for VLM, skipping Phase 2")
+            track_labels = {}
+        print(
+            f"[STEP] 结束: Phase2 VLM | {_step_ts()} | 耗时={time.perf_counter() - _vlm_t0:.2f}s | "
+            f"labels={len(track_labels)}"
+        )
 
         # Phase 3: re-render video with labels on bounding boxes
         tasks[task_id]["message"] = "正在重新渲染视频..."
         tasks[task_id]["progress"] = 80
-        print("[processor] Phase 3: re-rendering video with labels")
+        _rerender_t0 = time.perf_counter()
+        print(f"[STEP] 开始: Phase3 重渲染输出视频 | {_step_ts()} | frames≈{len(frame_results)}")
         cap2 = cv2.VideoCapture(video_path)
         writer2 = _create_video_writer(output_video_path, fps, frame_w, frame_h)
+        n_rerender = len(frame_results)
         for fi, fr_data in enumerate(frame_results):
             ok2, frame2 = cap2.read()
             if not ok2:
@@ -754,9 +1000,17 @@ def process_video(
             dets_raw = fr_data.get("detections", [])
             vis_frame2 = visualizer.draw_frame_boxes_with_labels(frame2, dets_raw, track_labels)
             writer2.write(vis_frame2)
+            if n_rerender > 0:
+                tasks[task_id]["progress"] = 80 + int(15 * (fi + 1) / n_rerender)
         cap2.release()
         writer2.release()
         print(f"[processor] Phase 3 done: re-rendered {len(frame_results)} frames")
+        print(
+            f"[STEP] 结束: Phase3 重渲染 | {_step_ts()} | 耗时={time.perf_counter() - _rerender_t0:.2f}s"
+        )
+
+        tasks[task_id]["message"] = "正在生成汇总数据..."
+        tasks[task_id]["progress"] = 96
 
         summary_detections = []
         for tid, lbl in track_labels.items():
@@ -769,8 +1023,34 @@ def process_video(
             entry["number"] = num
             entry["bg_color"] = bg
             summary_detections.append(entry)
+    elif is_face_only:
+        tasks[task_id]["message"] = "正在汇总人脸识别结果..."
+        tasks[task_id]["progress"] = 99
+        _agg_start = time.perf_counter()
+        print(
+            f"[STEP] 开始: _aggregate_detections_face_only | {_step_ts()} | "
+            f"task={task_id[:8]} 帧条目={len(frame_results)}"
+        )
+        summary_detections = _aggregate_detections_face_only(frame_results, fps)
+        _agg_elapsed = time.perf_counter() - _agg_start
+        print(
+            f"[STEP] 结束: _aggregate_detections_face_only | {_step_ts()} | "
+            f"耗时={_agg_elapsed:.2f}s | 汇总条数={len(summary_detections)}"
+        )
     else:
+        tasks[task_id]["message"] = "正在汇总轨迹与识别结果..."
+        tasks[task_id]["progress"] = 99
+        _agg_start = time.perf_counter()
+        print(
+            f"[STEP] 开始: _aggregate_detections | {_step_ts()} | "
+            f"task={task_id[:8]} 帧条目={len(frame_results)}"
+        )
         summary_detections = _aggregate_detections(frame_results, fps)
+        _agg_elapsed = time.perf_counter() - _agg_start
+        print(
+            f"[STEP] 结束: _aggregate_detections | {_step_ts()} | 耗时={_agg_elapsed:.2f}s | "
+            f"汇总条数={len(summary_detections)}"
+        )
 
     result = {
         "filename": os.path.basename(video_path),
@@ -785,18 +1065,46 @@ def process_video(
     output_dir = Path(output_video_path).parent
     frames_json_path = output_dir / f"{output_stem}_frames.json"
     summary_json_path = output_dir / f"{output_stem}_summary.json"
+    tasks[task_id]["message"] = "正在保存结果文件（大文件可能需数十秒）..."
+    tasks[task_id]["progress"] = 99
+    _save_bundle_t0 = time.perf_counter()
     try:
+        _fj_t0 = time.perf_counter()
+        print(f"[STEP] 开始: 写入 frames_json (可能很大) | {_step_ts()} | task={task_id[:8]}")
         frames_json_path.write_text(
             json.dumps(frame_results, indent=2, ensure_ascii=False, default=str),
             encoding="utf-8",
         )
+        _fj_kb = frames_json_path.stat().st_size / 1024
+        print(
+            f"[STEP] 结束: 写入 frames_json | {_step_ts()} | 耗时={time.perf_counter() - _fj_t0:.2f}s | {_fj_kb:.0f} KB"
+        )
+
+        _sj_t0 = time.perf_counter()
+        print(f"[STEP] 开始: 写入 summary_json | {_step_ts()} | task={task_id[:8]}")
         summary_json_path.write_text(
             json.dumps(result, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
-        print(f"[processor] saved {frames_json_path}  ({frames_json_path.stat().st_size / 1024:.0f} KB)")
-        print(f"[processor] saved {summary_json_path}")
+        print(
+            f"[STEP] 结束: 写入 summary_json | {_step_ts()} | 耗时={time.perf_counter() - _sj_t0:.3f}s | "
+            f"path={summary_json_path.name}"
+        )
+        print(
+            f"[STEP] JSON 落盘合计 | {_step_ts()} | "
+            f"总耗时={time.perf_counter() - _save_bundle_t0:.2f}s"
+        )
     except Exception as exc:
+        print(
+            f"[STEP] 写入 JSON 失败 | {_step_ts()} | 已耗时={time.perf_counter() - _save_bundle_t0:.2f}s | {exc}"
+        )
         print(f"[processor] failed to save JSON: {exc}")
 
+    _total_elapsed = time.perf_counter() - start_ts
+    print(
+        f"[STEP] 完成: process_video 全流程 | {_step_ts()} | "
+        f"总耗时={_total_elapsed:.2f}s | 进度=100%"
+    )
+    tasks[task_id]["progress"] = 100
+    tasks[task_id]["message"] = "处理完成"
     return result
