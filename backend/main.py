@@ -18,7 +18,7 @@ from system_metrics import get_system_metrics
 app = FastAPI()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LEGACY_VIDEOS_DIR = "/mnt/nas/【赛马会识别】/temp"
+LEGACY_VIDEOS_DIR = "/home/data/horse_video"
 APP_PORT = int(os.getenv("PORT", "8001"))
 
 app.add_middleware(

@@ -56,8 +56,7 @@ runtime:
 # 若 face_db_uri 指向不存在路径（如他人机器上的 /home/...），初始化会失败且整条人脸链路关闭（只保号码 OCR）。
 # Windows：请改为本机 .db，或设置环境变量 FACE_DB_URI；无独显时请 face_device: cpu
 rider_identity:
-  # 相对 backend 目录：仓库根目录的 rider.db
-  face_db_uri: "../rider.db"
+  face_db_uri: "rider.db"
   face_collection: "rider_faces"
   face_dim: 512
   face_min_score: 0.3

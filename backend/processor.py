@@ -453,11 +453,10 @@ def process_video(
     direction_filter: DirectionFilter | None = None
     rider_identity: RiderIdentityModule | None = None
 
-    if not is_simple:
+    if not is_simple and not is_face_only:
         roi_extractor = ROIExtractor(config.roi)
-        if not is_face_only:
-            enhancer = ROIEnhancer(config.enhance)
-            ocr_engine = OCREngine(config.ocr, device="gpu:0")
+        enhancer = ROIEnhancer(config.enhance)
+        ocr_engine = OCREngine(config.ocr, device="gpu:0")
 
     vlm_fallback: VLMFallback | None = None
     if not is_simple and not is_face_only:
@@ -615,66 +614,30 @@ def process_video(
                 continue
 
             if is_face_only:
-                assert roi_extractor is not None and rider_identity is not None
+                assert rider_identity is not None
                 vis_detections.append(det)
-                roi = roi_extractor.build_roi(det=det, frame_w=cur_w, frame_h=cur_h)
-                vis_rois.append(roi)
                 _tr0 = time.perf_counter()
                 rider_payload = rider_identity.identify(det=det, ocr_fused_payload=None)
                 _t_accum["rider_id"] += time.perf_counter() - _tr0
-                empty_fused = {
-                    "stable_id": "",
-                    "stable_conf": 0.0,
-                    "vote_ratio": 0.0,
-                    "support_count": 0,
-                    "sample_count": 0,
-                    "ready": False,
-                }
-                empty_state = {
-                    "status": "UNCONFIRMED",
-                    "stable_id": "",
-                    "bad_frame_count": 0,
-                    "lost_frame_count": 0,
-                    "hold_left_frames": 0,
-                }
-                zero_quality = {
-                    "score": 0.0, "sharpness": 0.0, "brightness": 0.0, "contrast": 0.0,
-                }
+
+                horse_x1 = int(round(det.x - det.w / 2.0))
+                horse_y1 = int(round(det.y - det.h / 2.0))
+                horse_x2 = int(round(det.x + det.w / 2.0))
+                horse_y2 = int(round(det.y + det.h / 2.0))
+
                 ocr_infos.append({
                     "track_id": det.track_id,
-                    "text": "",
-                    "conf": 0.0,
-                    "valid": False,
-                    "ocr_source": "disabled",
-                    "stable_id": "",
-                    "stable_ready": False,
-                    "state": "UNCONFIRMED",
-                    "state_id": "",
                     "rider_name": rider_payload["name"],
                     "rider_score": rider_payload["score"],
                     "rider_matched": rider_payload["matched"],
                     "rider_source": rider_payload.get("source", "none"),
-                    "rider_code": rider_payload.get("rider_code", ""),
-                    "rider_status": rider_payload.get("rider_status", ""),
-                    "rider_new": rider_payload.get("is_new_rider", False),
                     "face_bbox": rider_payload.get("face_bbox", []),
                     "face_score": rider_payload.get("face_score", 0.0),
                     "face_detected": rider_payload.get("face_detected", False),
-                    "horse_id": rider_payload.get("horse_id", ""),
-                    "vlm_bg": "",
-                    "vlm_font": "",
-                    "vlm_number": "",
-                    "vlm_prefix": "",
-                    "vlm_full_id": "",
+                    "horse_bbox": [horse_x1, horse_y1, horse_x2, horse_y2],
                 })
                 item = {
                     **asdict(det),
-                    "roi_bbox": roi_extractor.serialize(roi),
-                    "roi_quality": zero_quality,
-                    "ocr": {"text": "", "conf": 0.0, "valid": False, "raw_text": ""},
-                    "ocr_runtime": {"source": "face_only", "interval_frames": 0},
-                    "ocr_fused": empty_fused,
-                    "track_state": empty_state,
                     "rider_identity": rider_payload,
                 }
                 det_with_roi.append(item)
@@ -813,9 +776,28 @@ def process_video(
             }
             det_with_roi.append(item)
 
+        if is_face_only and rider_identity is not None:
+            for uface in rider_identity.unmatched_faces:
+                ubbox = uface.get("bbox", [])
+                if not isinstance(ubbox, list) or len(ubbox) < 4:
+                    continue
+                ocr_infos.append({
+                    "track_id": None,
+                    "rider_name": str(uface.get("name", "")),
+                    "rider_score": float(uface.get("score", 0.0)),
+                    "rider_matched": bool(uface.get("name") and float(uface.get("score", 0)) > 0),
+                    "rider_source": "face",
+                    "face_bbox": [int(v) for v in ubbox[:4]],
+                    "face_score": float(uface.get("det_score", 0.0)),
+                    "face_detected": True,
+                    "horse_bbox": [],
+                })
+
         _tv0 = time.perf_counter()
         if is_simple:
             vis_frame = visualizer.draw_frame_boxes_only(frame=frame, detections=vis_detections)
+        elif is_face_only:
+            vis_frame = visualizer.draw_frame_face_only(frame=frame, face_infos=ocr_infos)
         else:
             show_unmatched = (
                 rider_identity is not None

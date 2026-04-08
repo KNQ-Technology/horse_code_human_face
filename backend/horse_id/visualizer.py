@@ -28,7 +28,7 @@ _SOURCE_COLORS: dict[str, tuple[int, int, int]] = {
     "none": (120, 120, 120),
 }
 
-_CJK_FONT_PATH = "/home/hshan/fonts/STHeiti.ttc"
+_CJK_FONT_PATH = "fonts/STHeiti.ttc"
 _pil_font_cache: dict[int, ImageFont.FreeTypeFont] = {}
 
 
@@ -253,6 +253,108 @@ class ResultVisualizer:
                 self._draw_ocr_summary(canvas, ocr_infos)
         return canvas
 
+
+    def draw_frame_face_only(
+        self,
+        frame: np.ndarray,
+        face_infos: list[dict[str, object]],
+    ) -> np.ndarray:
+        """Face-only mode: draw only face bounding boxes with identity labels.
+
+        Each entry in *face_infos* must contain:
+            face_bbox, face_score, face_detected, rider_name, rider_matched,
+            rider_source, rider_score, track_id
+        Optionally: horse_bbox (x1,y1,x2,y2) for a subtle context outline.
+        """
+        canvas = frame.copy()
+        h_img, w_img = canvas.shape[:2]
+
+        for info in face_infos:
+            horse_bbox = info.get("horse_bbox")
+            if isinstance(horse_bbox, (list, tuple)) and len(horse_bbox) >= 4:
+                hx1, hy1, hx2, hy2 = (int(v) for v in horse_bbox[:4])
+                cv2.rectangle(canvas, (hx1, hy1), (hx2, hy2), (60, 60, 60), 1)
+
+            raw_bbox = info.get("face_bbox", [])
+            if not isinstance(raw_bbox, list) or len(raw_bbox) < 4:
+                continue
+            x1, y1, x2, y2 = (int(v) for v in raw_bbox[:4])
+            if x2 - x1 < 5 or y2 - y1 < 5:
+                continue
+
+            rider_name = str(info.get("rider_name", ""))
+            rider_matched = bool(info.get("rider_matched", False))
+            rider_score = float(info.get("rider_score", 0.0))
+            face_score = float(info.get("face_score", 0.0))
+
+            if rider_matched and rider_name:
+                glow_pad = 6
+                gx1, gy1 = max(0, x1 - glow_pad), max(0, y1 - glow_pad)
+                gx2, gy2 = min(w_img, x2 + glow_pad), min(h_img, y2 + glow_pad)
+                if gy2 > gy1 and gx2 > gx1:
+                    region = canvas[gy1:gy2, gx1:gx2].copy()
+                    cv2.rectangle(canvas, (gx1, gy1), (gx2, gy2), _COLOR_GOLD, -1)
+                    cv2.addWeighted(
+                        canvas[gy1:gy2, gx1:gx2], 0.20, region, 0.80, 0,
+                        canvas[gy1:gy2, gx1:gx2],
+                    )
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), _COLOR_GOLD, 3)
+                self._draw_corner_brackets(
+                    canvas, x1 - 5, y1 - 5, x2 + 5, y2 + 5, _COLOR_GOLD, 2,
+                )
+                label = f"★ {rider_name} {rider_score:.2f}"
+                box_color = _COLOR_GOLD
+            else:
+                cv2.rectangle(canvas, (x1, y1), (x2, y2), _COLOR_CYAN, 2)
+                label = f"? {face_score:.2f}" if face_score > 0 else "face"
+                box_color = _COLOR_CYAN
+
+            fs = 18
+            tw, th = _text_size_pil(label, fs)
+            label_y_top = max(0, y1 - th - 6)
+            cv2.rectangle(
+                canvas, (x1, label_y_top), (x1 + tw + 6, label_y_top + th + 4),
+                box_color, -1,
+            )
+            _put_text_pil(canvas, label, (x1 + 3, label_y_top + 1), fs, _COLOR_WHITE)
+
+        self._draw_face_summary_panel(canvas, face_infos)
+        return canvas
+
+    def _draw_face_summary_panel(
+        self,
+        canvas: np.ndarray,
+        face_infos: list[dict[str, object]],
+    ) -> None:
+        """Draw a compact face recognition summary in the top-left corner."""
+        matched = [
+            info for info in face_infos
+            if bool(info.get("rider_matched", False)) and str(info.get("rider_name", ""))
+        ]
+        if not matched:
+            return
+
+        x0, y0 = 12, 16
+        line_h = 28
+        fs = 18
+        box_w = 420
+        box_h = 8 + line_h * (len(matched) + 1)
+
+        overlay = canvas.copy()
+        cv2.rectangle(overlay, (x0, y0), (x0 + box_w, y0 + box_h), (20, 20, 20), -1)
+        cv2.addWeighted(overlay, 0.75, canvas, 0.25, 0, canvas)
+        cv2.rectangle(canvas, (x0, y0), (x0 + box_w, y0 + box_h), _COLOR_GOLD, 1)
+
+        with PilBatchRenderer(canvas) as pil:
+            pil.text((x0 + 8, y0 + 4), "人脸识别结果", fs, _COLOR_GOLD)
+            for i, info in enumerate(matched):
+                name = str(info.get("rider_name", ""))
+                score = float(info.get("rider_score", 0.0))
+                tid = info.get("track_id")
+                tid_str = f"T{tid}" if tid is not None else ""
+                line = f"★ {name}  ({score:.2f})  {tid_str}"
+                ly = y0 + 4 + line_h * (i + 1)
+                pil.text((x0 + 8, ly), line, 16, _COLOR_GOLD)
 
     def draw_frame_boxes_only(
         self,
