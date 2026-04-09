@@ -33,7 +33,7 @@ hydtest 分支在 master 基础上完成了以下工作:
 | `roi_extractor.py` | 从马匹检测框提取鞍垫 ROI 区域 |
 | `track_fusion.py` | OCR 结果时序融合: 滑动窗口投票 + 锁定机制 |
 | `track_state.py` | 轨迹状态机: UNCONFIRMED → CONFIRMED → LOST |
-| `visualizer.py` | 结果可视化: 检测框、号码、骑手名、人脸框绘制 |
+| `visualizer.py` | 结果可视化: 检测框、号码、骑手名、人脸框绘制; PIL 文字渲染局部化优化 |
 | `vlm_fallback.py` | VLM 回退: OCR 失败时调用 Qwen API 识别鞍垫号码 |
 | `vlm_video.py` | 简化模式: 对裁剪图调用多模态 VLM 识别号码 |
 | `types.py` | 数据类型定义: HorseDetection, ROIBox, OCRResult |
@@ -141,11 +141,13 @@ hydtest 分支在 master 基础上完成了以下工作:
 
 | 指标 | master (无算法) | hydtest 初始 | hydtest 最终 |
 |------|----------------|-------------|-------------|
-| 处理耗时 | — | 182 秒 | **33 秒** |
-| 帧率 | — | 2.75 fps | **15.21 fps** |
-| OCR | — | 342 ms/帧 (CPU) | **5.2 ms/帧 (GPU)** |
-| SCRFD | — | 不可用 | **6.6 ms/帧 (GPU)** |
+| 处理耗时 | — | 182 秒 | **21.5 秒** |
+| 帧率 | — | 2.75 fps | **23.3 fps** |
+| OCR | — | 342 ms/帧 (CPU) | **5.6 ms/帧 (GPU)** |
+| SCRFD | — | 不可用 | **6.5 ms/帧 (GPU)** |
+| 可视化 | — | 81.9 ms/帧 | **11.3 ms/帧 (局部PIL + 异步)** |
 | 骑手识别 | — | 不可用 | **已启用** |
+| 总提升 | — | — | **8.5x** |
 
 ---
 
