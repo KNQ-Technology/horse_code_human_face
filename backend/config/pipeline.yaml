@@ -60,7 +60,7 @@ rider_identity:
   face_collection: "rider_faces"
   face_dim: 512
   face_min_score: 0.3
-  face_device: "cpu"
+  face_device: "cuda"
   face_models_dir: "horse_id/models"
   horse_rider_map: ""
   feature_store_path: "outputs/rider_identity.sqlite"
