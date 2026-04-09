@@ -581,18 +581,23 @@ def process_video(
     _reader = threading.Thread(target=_reader_thread, daemon=True)
     _reader.start()
 
-    # --- Pipeline stage 3: async write thread ---
+    # --- Pipeline stage 3: async viz + write thread ---
     _WRITE_QUEUE_SIZE = 4
-    _write_q: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=_WRITE_QUEUE_SIZE)
-    _write_t_accum = {"write": 0.0}
+    # Queue items: None (sentinel) or dict with viz params + frame
+    _write_q: queue.Queue[dict | None] = queue.Queue(maxsize=_WRITE_QUEUE_SIZE)
+    _write_t_accum = {"viz": 0.0, "write": 0.0}
 
     def _writer_thread() -> None:
         while True:
             item = _write_q.get()
             if item is None:
                 break
+            _tv0 = time.perf_counter()
+            viz_func = item["viz_func"]
+            vis_frame = viz_func()
+            _write_t_accum["viz"] += time.perf_counter() - _tv0
             _tw0 = time.perf_counter()
-            writer.write(item)
+            writer.write(vis_frame)
             _write_t_accum["write"] += time.perf_counter() - _tw0
 
     _writer = threading.Thread(target=_writer_thread, daemon=True)
@@ -827,34 +832,47 @@ def process_video(
                     "horse_bbox": [],
                 })
 
-        _tv0 = time.perf_counter()
-        if is_simple:
-            vis_frame = visualizer.draw_frame_boxes_only(frame=frame, detections=vis_detections)
-        elif is_face_only:
-            vis_frame = visualizer.draw_frame_face_only(frame=frame, face_infos=ocr_infos)
-        else:
-            show_unmatched = (
-                rider_identity is not None
-                and rider_identity.enabled
-            )
-            vis_frame = visualizer.draw_frame(
-                frame=frame, detections=vis_detections, rois=vis_rois, ocr_infos=ocr_infos,
-                unmatched_faces=rider_identity.unmatched_faces if show_unmatched else None,
-            )
-        if viz_mode == "debug" and not is_simple and not is_face_only and not hide_numbers:
-            vis_frame = visualizer.draw_roi_comparison_panel(
-                frame=vis_frame,
-                roi_original_bgr=first_roi_raw,
-                roi_enhanced_gray=first_roi_enh,
-                roi_binary=first_roi_bin,
-                quality_score=first_quality_score,
-                ocr_text=first_ocr_text,
-                ocr_conf=first_ocr_conf,
-                ocr_valid=first_ocr_valid,
-            )
-        _t_accum["viz"] += time.perf_counter() - _tv0
-        # Async write: hand off to writer thread
-        _write_q.put(vis_frame)
+        # Capture viz params for async viz+write thread
+        _viz_frame = frame
+        _viz_detections = vis_detections
+        _viz_rois = vis_rois
+        _viz_ocr_infos = ocr_infos
+        _viz_unmatched = (
+            list(rider_identity.unmatched_faces)
+            if (not is_simple and rider_identity is not None and rider_identity.enabled)
+            else None
+        )
+        _viz_roi_raw = first_roi_raw
+        _viz_roi_enh = first_roi_enh
+        _viz_roi_bin = first_roi_bin
+        _viz_qs = first_quality_score
+        _viz_ot = first_ocr_text
+        _viz_oc = first_ocr_conf
+        _viz_ov = first_ocr_valid
+
+        def _do_viz(
+            _f=_viz_frame, _d=_viz_detections, _r=_viz_rois, _o=_viz_ocr_infos,
+            _u=_viz_unmatched, _rr=_viz_roi_raw, _re=_viz_roi_enh, _rb=_viz_roi_bin,
+            _qs=_viz_qs, _ot=_viz_ot, _oc=_viz_oc, _ov=_viz_ov,
+        ):
+            if is_simple:
+                vf = visualizer.draw_frame_boxes_only(frame=_f, detections=_d)
+            elif is_face_only:
+                vf = visualizer.draw_frame_face_only(frame=_f, face_infos=_o)
+            else:
+                vf = visualizer.draw_frame(
+                    frame=_f, detections=_d, rois=_r, ocr_infos=_o,
+                    unmatched_faces=_u,
+                )
+            if viz_mode == "debug" and not is_simple and not is_face_only and not hide_numbers:
+                vf = visualizer.draw_roi_comparison_panel(
+                    frame=vf, roi_original_bgr=_rr, roi_enhanced_gray=_re,
+                    roi_binary=_rb, quality_score=_qs, ocr_text=_ot,
+                    ocr_conf=_oc, ocr_valid=_ov,
+                )
+            return vf
+
+        _write_q.put({"viz_func": _do_viz})
 
         frame_results.append({"frame_index": frame_idx, "detections": det_with_roi})
         if not is_simple and not is_face_only:
@@ -889,6 +907,7 @@ def process_video(
     _writer.join()
     _reader.join(timeout=5.0)
     _t_accum["write"] += _write_t_accum["write"]
+    _t_accum["viz"] += _write_t_accum.get("viz", 0.0)
 
     # Phase: 帧循环结束，开始收尾
     print(
