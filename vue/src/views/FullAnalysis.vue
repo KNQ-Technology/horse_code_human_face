@@ -132,9 +132,9 @@ const startUpload = async () => {
           <router-link to="/" class="mode-tab" :class="{ active: route.path === '/' }">
             骑手识别
           </router-link>
-          <router-link to="/face" class="mode-tab" :class="{ active: route.path === '/face' }">
+<!--          <router-link to="/face" class="mode-tab" :class="{ active: route.path === '/face' }">
             仅人脸
-          </router-link>
+          </router-link>-->
           <router-link to="/simple" class="mode-tab" :class="{ active: route.path === '/simple' }">
             号码识别
           </router-link>
