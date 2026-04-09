@@ -1,3 +1,5 @@
+import _nvidia_dll_fix  # noqa: F401 — must be first import
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles

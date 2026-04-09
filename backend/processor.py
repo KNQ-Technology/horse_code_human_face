@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import _nvidia_dll_fix  # noqa: F401 — must precede paddle/torch imports
+
 import json
 import os
+import queue
 import shutil
 import subprocess
 import threading
@@ -564,9 +567,40 @@ def process_video(
         f"(全功能进度条 0–97% 对应该阶段)"
     )
 
+    # --- Pipeline stage 1: prefetch read thread ---
+    _READ_QUEUE_SIZE = 4
+    _read_q: queue.Queue[tuple[bool, np.ndarray | None]] = queue.Queue(maxsize=_READ_QUEUE_SIZE)
+
+    def _reader_thread() -> None:
+        while True:
+            ok, frame = cap.read()
+            _read_q.put((ok, frame))
+            if not ok:
+                break
+
+    _reader = threading.Thread(target=_reader_thread, daemon=True)
+    _reader.start()
+
+    # --- Pipeline stage 3: async write thread ---
+    _WRITE_QUEUE_SIZE = 4
+    _write_q: queue.Queue[np.ndarray | None] = queue.Queue(maxsize=_WRITE_QUEUE_SIZE)
+    _write_t_accum = {"write": 0.0}
+
+    def _writer_thread() -> None:
+        while True:
+            item = _write_q.get()
+            if item is None:
+                break
+            _tw0 = time.perf_counter()
+            writer.write(item)
+            _write_t_accum["write"] += time.perf_counter() - _tw0
+
+    _writer = threading.Thread(target=_writer_thread, daemon=True)
+    _writer.start()
+
     while True:
         _t0 = time.perf_counter()
-        ok, frame = cap.read()
+        ok, frame = _read_q.get()
         if not ok:
             break
         _t_accum["read"] += time.perf_counter() - _t0
@@ -819,9 +853,8 @@ def process_video(
                 ocr_valid=first_ocr_valid,
             )
         _t_accum["viz"] += time.perf_counter() - _tv0
-        _tw0 = time.perf_counter()
-        writer.write(vis_frame)
-        _t_accum["write"] += time.perf_counter() - _tw0
+        # Async write: hand off to writer thread
+        _write_q.put(vis_frame)
 
         frame_results.append({"frame_index": frame_idx, "detections": det_with_roi})
         if not is_simple and not is_face_only:
@@ -845,10 +878,17 @@ def process_video(
             if _elapsed > 0:
                 _prof = {}
                 for _pk, _pv in _t_accum.items():
-                    _prof[_pk] = round(_pv / _elapsed * 100, 1)
-                _prof_sum = sum(_t_accum.values())
+                    _pv_merged = _pv + _write_t_accum.get(_pk, 0.0)
+                    _prof[_pk] = round(_pv_merged / _elapsed * 100, 1)
+                _prof_sum = sum(_t_accum.values()) + sum(_write_t_accum.values())
                 _prof["other"] = round(max(0, _elapsed - _prof_sum) / _elapsed * 100, 1)
                 tasks[task_id]["profiling"] = _prof
+
+    # Signal writer thread to finish and wait
+    _write_q.put(None)
+    _writer.join()
+    _reader.join(timeout=5.0)
+    _t_accum["write"] += _write_t_accum["write"]
 
     # Phase: 帧循环结束，开始收尾
     print(

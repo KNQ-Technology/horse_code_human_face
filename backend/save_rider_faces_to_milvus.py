@@ -325,22 +325,44 @@ def save_rider_faces_to_milvus(
         print("[rider2milvus] *** DRY-RUN 模式 — 仅分析质量，不实际入库 ***")
 
     use_lite = _is_lite_uri(uri)
+    use_sqlite_fallback = False
     client: MilvusClient | None = None
     collection: Collection | None = None
+    sqlite_store = None
 
     if not dry_run:
         if use_lite:
+            # Try Milvus Lite first; fall back to SQLite on Windows
+            _milvus_lite_ok = False
             try:
-                import pkg_resources  # noqa: F401
+                import milvus_lite  # noqa: F401
+                _milvus_lite_ok = True
             except ImportError:
+                pass
+
+            if _milvus_lite_ok:
                 try:
-                    import setuptools  # noqa: F401
+                    import pkg_resources  # noqa: F401
                 except ImportError:
-                    pass
-            lite_path = Path(uri).resolve()
-            lite_path.parent.mkdir(parents=True, exist_ok=True)
-            client = MilvusClient(str(lite_path))
-            _ensure_collection_lite(client, collection_name, dim, overwrite_collection)
+                    try:
+                        import setuptools  # noqa: F401
+                    except ImportError:
+                        pass
+                lite_path = Path(uri).resolve()
+                lite_path.parent.mkdir(parents=True, exist_ok=True)
+                client = MilvusClient(str(lite_path))
+                _ensure_collection_lite(client, collection_name, dim, overwrite_collection)
+            else:
+                # SQLite fallback — write to <stem>.sqlite.db alongside the original URI
+                from horse_id.sqlite_face_store import SQLiteFaceStore
+                base = Path(uri).expanduser().resolve()
+                sqlite_path = base.parent / f"{base.stem}.sqlite.db"
+                sqlite_path.parent.mkdir(parents=True, exist_ok=True)
+                sqlite_store = SQLiteFaceStore(str(sqlite_path), collection_name, dim)
+                if overwrite_collection:
+                    sqlite_store.drop_collection()
+                use_sqlite_fallback = True
+                print(f"[rider2milvus] milvus-lite unavailable, using SQLite fallback: {sqlite_path}")
         else:
             _ensure_collection(
                 collection_name=collection_name, dim=dim, uri=uri,
@@ -371,7 +393,11 @@ def save_rider_faces_to_milvus(
         batch_num += 1
         print(f"[rider2milvus] 第 {batch_num} 批: insert ({len(batch_emb)} 条)...", flush=True)
         try:
-            if use_lite and client is not None:
+            if use_sqlite_fallback and sqlite_store is not None:
+                sqlite_store.insert(batch_emb, batch_names, batch_paths)
+                total_inserted += len(batch_emb)
+                print(f"[rider2milvus] 已落盘(SQLite): 累计 {total_inserted} 条")
+            elif use_lite and client is not None:
                 data = [
                     {"vector": batch_emb[i], "name": batch_names[i], "photo_path": batch_paths[i]}
                     for i in range(len(batch_emb))
@@ -502,7 +528,7 @@ def save_rider_faces_to_milvus(
             )
 
     if validate and all_embeddings:
-        _run_validation(report, all_embeddings, use_lite, client, collection, collection_name, dry_run)
+        _run_validation(report, all_embeddings, use_lite, client, collection, collection_name, dry_run, sqlite_store=sqlite_store)
 
     if not dry_run:
         print(f"[rider2milvus] 完成: 总数={count_total}, 入库={count_ok}, 跳过={count_total - count_ok}")
@@ -526,6 +552,7 @@ def _run_validation(
     collection: Collection | None,
     collection_name: str,
     dry_run: bool,
+    sqlite_store: Any = None,
 ) -> None:
     """Post-enrollment validation: intra-class consistency + self-match test."""
     print("\n[validation] 开始入库自验证...")
@@ -566,11 +593,11 @@ def _run_validation(
                         ok_details[idx]["outlier"] = True
                         print(f"    [OUTLIER] {rname} 第{idx+1}张 sim={sim_to_centroid:.3f}")
 
-    # --- Self-match via Milvus search (only when not dry-run) ---
-    if dry_run or (client is None and collection is None):
+    # --- Self-match via search (only when not dry-run) ---
+    if dry_run or (client is None and collection is None and sqlite_store is None):
         for rname in by_name:
             report["riders"].get(rname, {})["self_match_all_correct"] = None
-        print("[validation] dry-run 模式跳过 Milvus 自匹配测试")
+        print("[validation] dry-run 模式跳过自匹配测试")
         return
 
     print("[validation] 自匹配测试 (每个 embedding 搜索 top-3)...")
@@ -581,7 +608,11 @@ def _run_validation(
         for emb in embs:
             total_queries += 1
             top_name = None
-            if use_lite and client is not None:
+            if sqlite_store is not None:
+                hits = sqlite_store.search(emb.tolist(), limit=1)
+                if hits:
+                    top_name = hits[0].get("name", "")
+            elif use_lite and client is not None:
                 res = client.search(
                     collection_name=collection_name, data=[emb.tolist()],
                     limit=3, output_fields=["name"],
