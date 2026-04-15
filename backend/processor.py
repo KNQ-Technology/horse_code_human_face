@@ -312,7 +312,10 @@ def _aggregate_detections(
             claimed[rname] = horse_id
 
     results = []
-    for horse_id in sorted(horse_rider_picks.keys()):
+    for horse_id in sorted(
+        horse_rider_picks.keys(),
+        key=lambda h: horse_groups[h]["first_frame"],
+    ):
         rname, _, rscore = horse_rider_picks[horse_id]
         if rname and claimed.get(rname) != horse_id:
             continue
@@ -320,7 +323,7 @@ def _aggregate_detections(
         hg = horse_groups[horse_id]
         person_name = rname if rname else "其他骑师"
         conf_str = f"{hg['best_conf']:.2f}_{rscore:.2f}"
-        timestamp = _frame_to_timestamp(hg["best_frame"], fps)
+        timestamp = _frame_to_timestamp(hg["first_frame"], fps)
         results.append({
             "timestamp": timestamp,
             "horse_id": horse_id,
@@ -360,9 +363,20 @@ def _aggregate_detections_simple(
         if best_id not in horse_ids or count > horse_ids[best_id]:
             horse_ids[best_id] = count
 
+    track_first_frame: dict[str, int] = {}
+    for fr in frame_results:
+        fi = int(fr.get("frame_index", 0))
+        for det in fr.get("detections", []):
+            vlm_id = str(det.get("vlm_id", ""))
+            if vlm_id and vlm_id in horse_ids and vlm_id not in track_first_frame:
+                track_first_frame[vlm_id] = fi
+
     return [
         {"horse_id": hid, "confidence": f"{count}"}
-        for hid, count in sorted(horse_ids.items())
+        for hid, count in sorted(
+            horse_ids.items(),
+            key=lambda x: track_first_frame.get(x[0], 0),
+        )
         if count >= MIN_SIMPLE_DISPLAY_FRAMES
     ]
 
@@ -397,17 +411,27 @@ def _aggregate_detections_face_only(
                 track_best_conf[tid] = hconf
                 track_best_frame[tid] = fi
 
+    track_first_frame: dict[int, int] = {}
+    for fr in frame_results:
+        fi = int(fr.get("frame_index", 0))
+        for det in fr.get("detections", []):
+            tid_raw = det.get("track_id")
+            if tid_raw is not None:
+                t = int(tid_raw)
+                if t in track_votes and t not in track_first_frame:
+                    track_first_frame[t] = fi
+
     results: list[dict[str, str]] = []
-    for tid in sorted(track_votes.keys()):
+    for tid in sorted(track_votes.keys(), key=lambda t: track_first_frame.get(t, 0)):
         votes = track_votes[tid]
         if len(votes) < MIN_FACE_FRAMES_FOR_RIDER:
             continue
         top_name, _cnt = Counter(n for n, _ in votes).most_common(1)[0]
         sub = [s for n, s in votes if n == top_name]
         avg_score = sum(sub) / len(sub) if sub else 0.0
-        bf = track_best_frame[tid]
+        ff = track_first_frame.get(tid, 0)
         results.append({
-            "timestamp": _frame_to_timestamp(bf, fps),
+            "timestamp": _frame_to_timestamp(ff, fps),
             "horse_id": "",
             "person_name": top_name,
             "confidence": f"{track_best_conf[tid]:.2f}_{avg_score:.2f}",
