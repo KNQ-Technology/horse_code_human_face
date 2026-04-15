@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import queue
 import threading
 import time
 from collections import Counter
@@ -414,6 +415,75 @@ def _aggregate_detections_face_only(
     return results
 
 
+_PIPELINE_SENTINEL = object()
+
+
+def _frame_reader_fn(
+    cap: cv2.VideoCapture,
+    out_q: "queue.Queue[np.ndarray | object]",
+) -> None:
+    """Pre-read frames from VideoCapture into a bounded queue."""
+    try:
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            out_q.put(frame)
+    finally:
+        out_q.put(_PIPELINE_SENTINEL)
+
+
+def _viz_writer_fn(
+    in_q: "queue.Queue[dict[str, Any] | object]",
+    visualizer: ResultVisualizer,
+    writer: "cv2.VideoWriter | _FFmpegWriter",
+    t_accum: dict[str, float],
+) -> None:
+    """Consume viz payloads from queue, render overlays, and write encoded frames."""
+    while True:
+        payload = in_q.get()
+        if payload is _PIPELINE_SENTINEL:
+            break
+
+        _tv0 = time.perf_counter()
+        frame = payload["frame"]
+        pmode = payload["mode"]
+
+        if pmode == "simple":
+            vis_frame = visualizer.draw_frame_boxes_only(
+                frame=frame, detections=payload["vis_detections"],
+            )
+        elif pmode == "face":
+            vis_frame = visualizer.draw_frame_face_only(
+                frame=frame, face_infos=payload["ocr_infos"],
+            )
+        else:
+            vis_frame = visualizer.draw_frame(
+                frame=frame,
+                detections=payload["vis_detections"],
+                rois=payload["vis_rois"],
+                ocr_infos=payload["ocr_infos"],
+                unmatched_faces=payload.get("unmatched_faces"),
+            )
+        if payload.get("draw_debug_panel"):
+            vis_frame = visualizer.draw_roi_comparison_panel(
+                frame=vis_frame,
+                roi_original_bgr=payload.get("first_roi_raw"),
+                roi_enhanced_gray=payload.get("first_roi_enh"),
+                roi_binary=payload.get("first_roi_bin"),
+                quality_score=payload.get("first_quality_score"),
+                ocr_text=payload.get("first_ocr_text"),
+                ocr_conf=payload.get("first_ocr_conf"),
+                ocr_valid=payload.get("first_ocr_valid"),
+            )
+
+        t_accum["viz"] += time.perf_counter() - _tv0
+
+        _tw0 = time.perf_counter()
+        writer.write(vis_frame)
+        t_accum["write"] += time.perf_counter() - _tw0
+
+
 def process_video(
     task_id: str,
     video_path: str,
@@ -564,11 +634,25 @@ def process_video(
         f"(全功能进度条 0–97% 对应该阶段)"
     )
 
+    read_q: queue.Queue[np.ndarray | object] = queue.Queue(maxsize=4)
+    write_q: queue.Queue[dict[str, Any] | object] = queue.Queue(maxsize=4)
+    _read_thread = threading.Thread(
+        target=_frame_reader_fn, args=(cap, read_q), daemon=True,
+    )
+    _write_thread = threading.Thread(
+        target=_viz_writer_fn,
+        args=(write_q, visualizer, writer, _t_accum),
+        daemon=True,
+    )
+    _read_thread.start()
+    _write_thread.start()
+
     while True:
         _t0 = time.perf_counter()
-        ok, frame = cap.read()
-        if not ok:
+        _rd_item = read_q.get()
+        if _rd_item is _PIPELINE_SENTINEL:
             break
+        frame: np.ndarray = _rd_item  # type: ignore[assignment]
         _t_accum["read"] += time.perf_counter() - _t0
 
         _t0 = time.perf_counter()
@@ -793,35 +877,34 @@ def process_video(
                     "horse_bbox": [],
                 })
 
-        _tv0 = time.perf_counter()
+        _viz_payload: dict[str, Any] = {
+            "frame": frame,
+            "vis_detections": vis_detections,
+            "vis_rois": vis_rois,
+            "ocr_infos": ocr_infos,
+        }
         if is_simple:
-            vis_frame = visualizer.draw_frame_boxes_only(frame=frame, detections=vis_detections)
+            _viz_payload["mode"] = "simple"
         elif is_face_only:
-            vis_frame = visualizer.draw_frame_face_only(frame=frame, face_infos=ocr_infos)
+            _viz_payload["mode"] = "face"
         else:
-            show_unmatched = (
-                rider_identity is not None
-                and rider_identity.enabled
-            )
-            vis_frame = visualizer.draw_frame(
-                frame=frame, detections=vis_detections, rois=vis_rois, ocr_infos=ocr_infos,
-                unmatched_faces=rider_identity.unmatched_faces if show_unmatched else None,
+            _viz_payload["mode"] = "full"
+            _viz_payload["unmatched_faces"] = (
+                list(rider_identity.unmatched_faces)
+                if rider_identity is not None and rider_identity.enabled
+                   and rider_identity.unmatched_faces
+                else None
             )
         if viz_mode == "debug" and not is_simple and not is_face_only and not hide_numbers:
-            vis_frame = visualizer.draw_roi_comparison_panel(
-                frame=vis_frame,
-                roi_original_bgr=first_roi_raw,
-                roi_enhanced_gray=first_roi_enh,
-                roi_binary=first_roi_bin,
-                quality_score=first_quality_score,
-                ocr_text=first_ocr_text,
-                ocr_conf=first_ocr_conf,
-                ocr_valid=first_ocr_valid,
-            )
-        _t_accum["viz"] += time.perf_counter() - _tv0
-        _tw0 = time.perf_counter()
-        writer.write(vis_frame)
-        _t_accum["write"] += time.perf_counter() - _tw0
+            _viz_payload["draw_debug_panel"] = True
+            _viz_payload["first_roi_raw"] = first_roi_raw
+            _viz_payload["first_roi_enh"] = first_roi_enh
+            _viz_payload["first_roi_bin"] = first_roi_bin
+            _viz_payload["first_quality_score"] = first_quality_score
+            _viz_payload["first_ocr_text"] = first_ocr_text
+            _viz_payload["first_ocr_conf"] = first_ocr_conf
+            _viz_payload["first_ocr_valid"] = first_ocr_valid
+        write_q.put(_viz_payload)
 
         frame_results.append({"frame_index": frame_idx, "detections": det_with_roi})
         if not is_simple and not is_face_only:
@@ -856,10 +939,15 @@ def process_video(
         f"耗时={time.perf_counter() - _loop_t0:.2f}s | frames={frame_idx}"
     )
 
+    _read_thread.join(timeout=5.0)
+
     _cap_t0 = time.perf_counter()
     print(f"[STEP] 开始: cap.release | {_step_ts()}")
     cap.release()
     print(f"[STEP] 结束: cap.release | {_step_ts()} | 耗时={time.perf_counter() - _cap_t0:.3f}s")
+
+    write_q.put(_PIPELINE_SENTINEL)
+    _write_thread.join(timeout=120.0)
 
     _wr_t0 = time.perf_counter()
     print(f"[STEP] 开始: writer.release (含 FFmpeg 管道收尾，可能较慢) | {_step_ts()}")

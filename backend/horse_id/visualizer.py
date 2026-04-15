@@ -55,30 +55,37 @@ def _put_text_pil(
     font_size: int,
     color_bgr: tuple[int, int, int],
 ) -> None:
-    """Render text with CJK support via PIL. Modifies canvas in-place."""
-    pil_img = Image.fromarray(cv2.cvtColor(canvas, cv2.COLOR_BGR2RGB))
-    draw = ImageDraw.Draw(pil_img)
+    """Render text with CJK support via PIL on a local patch (avoids full-frame conversion)."""
+    ch, cw = canvas.shape[:2]
+    tw, th = _text_size_pil(text, font_size)
+    pad = 4
+    px1 = max(0, xy[0] - pad)
+    py1 = max(0, xy[1] - pad)
+    px2 = min(cw, xy[0] + tw + pad * 2)
+    py2 = min(ch, xy[1] + th + pad * 2)
+    if px2 <= px1 or py2 <= py1:
+        return
+    patch = canvas[py1:py2, px1:px2].copy()
+    pil_patch = Image.fromarray(cv2.cvtColor(patch, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_patch)
     font = _get_font(font_size)
     rgb = (color_bgr[2], color_bgr[1], color_bgr[0])
-    draw.text(xy, text, font=font, fill=rgb)
-    canvas[:] = cv2.cvtColor(np.asarray(pil_img), cv2.COLOR_RGB2BGR)
+    draw.text((xy[0] - px1, xy[1] - py1), text, font=font, fill=rgb)
+    canvas[py1:py2, px1:px2] = cv2.cvtColor(np.asarray(pil_patch), cv2.COLOR_RGB2BGR)
 
 
 class PilBatchRenderer:
     """Context manager for batched PIL text rendering.
 
-    Converts canvas BGR->RGB once on enter, accumulates draw calls,
-    then converts back RGB->BGR once on exit.
+    Accumulates draw calls, then renders on a local patch covering the union
+    bounding box of all text — avoids full-frame BGR↔RGB conversion.
     """
 
     def __init__(self, canvas: np.ndarray) -> None:
         self._canvas = canvas
-        self._pil_img: Image.Image | None = None
-        self._draw: ImageDraw.ImageDraw | None = None
+        self._calls: list[tuple[tuple[int, int], str, int, tuple[int, int, int]]] = []
 
     def __enter__(self) -> "PilBatchRenderer":
-        self._pil_img = Image.fromarray(cv2.cvtColor(self._canvas, cv2.COLOR_BGR2RGB))
-        self._draw = ImageDraw.Draw(self._pil_img)
         return self
 
     def text(
@@ -88,17 +95,37 @@ class PilBatchRenderer:
         font_size: int,
         color_bgr: tuple[int, int, int],
     ) -> None:
-        if self._draw is None:
-            return
-        font = _get_font(font_size)
-        rgb = (color_bgr[2], color_bgr[1], color_bgr[0])
-        self._draw.text(xy, text, font=font, fill=rgb)
+        self._calls.append((xy, text, font_size, color_bgr))
 
     def __exit__(self, *_: object) -> None:
-        if self._pil_img is not None:
-            self._canvas[:] = cv2.cvtColor(np.asarray(self._pil_img), cv2.COLOR_RGB2BGR)
-        self._pil_img = None
-        self._draw = None
+        if not self._calls:
+            return
+        ch, cw = self._canvas.shape[:2]
+        pad = 4
+        min_x, min_y = cw, ch
+        max_x, max_y = 0, 0
+        for xy, text, font_size, _ in self._calls:
+            tw, th = _text_size_pil(text, font_size)
+            min_x = min(min_x, xy[0])
+            min_y = min(min_y, xy[1])
+            max_x = max(max_x, xy[0] + tw)
+            max_y = max(max_y, xy[1] + th)
+        px1 = max(0, min_x - pad)
+        py1 = max(0, min_y - pad)
+        px2 = min(cw, max_x + pad * 2)
+        py2 = min(ch, max_y + pad * 2)
+        if px2 <= px1 or py2 <= py1:
+            return
+        patch = self._canvas[py1:py2, px1:px2].copy()
+        pil_patch = Image.fromarray(cv2.cvtColor(patch, cv2.COLOR_BGR2RGB))
+        draw = ImageDraw.Draw(pil_patch)
+        for xy, text, font_size, color_bgr in self._calls:
+            font = _get_font(font_size)
+            rgb = (color_bgr[2], color_bgr[1], color_bgr[0])
+            draw.text((xy[0] - px1, xy[1] - py1), text, font=font, fill=rgb)
+        self._canvas[py1:py2, px1:px2] = cv2.cvtColor(
+            np.asarray(pil_patch), cv2.COLOR_RGB2BGR,
+        )
 
 
 class ResultVisualizer:
