@@ -1,5 +1,3 @@
-import _nvidia_dll_fix  # noqa: F401 — must be first import
-
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -21,7 +19,7 @@ app = FastAPI()
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LEGACY_VIDEOS_DIR = "/home/data/horse_video"
-APP_PORT = int(os.getenv("PORT", "8001"))
+APP_PORT = int(os.getenv("PORT", "8002"))
 
 app.add_middleware(
     CORSMiddleware,

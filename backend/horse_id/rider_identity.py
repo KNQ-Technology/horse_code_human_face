@@ -55,23 +55,8 @@ class _TrackIdentityState:
     last_face_bbox: list[int] = field(default_factory=list)
 
 
-def _milvus_lite_available() -> bool:
-    """Check whether milvus-lite can be imported (unavailable on Windows)."""
-    try:
-        import milvus_lite  # noqa: F401
-        return True
-    except ImportError:
-        return False
-
-
 class _FaceIdentityBackend:
-    """Face retrieval backend for rider name search.
-
-    Supports three backends (tried in order for local .db URIs):
-      1. Milvus Lite  (pymilvus MilvusClient — Linux/macOS)
-      2. SQLite        (horse_id.sqlite_face_store — Windows fallback)
-      3. Milvus Server (pymilvus Collection — any platform, needs Docker)
-    """
+    """Face retrieval backend for rider name search in Milvus."""
 
     def __init__(
         self,
@@ -91,93 +76,20 @@ class _FaceIdentityBackend:
             device=device,
             models_dir=Path(models_dir).resolve() if models_dir else None,
         )
-        self.client = None       # MilvusClient (Lite)
-        self.collection = None   # Milvus Server Collection
-        self._sqlite_store = None  # SQLiteFaceStore fallback
-
+        self.client = None
+        self.collection = None
         if self.use_lite:
-            if _milvus_lite_available():
-                from pymilvus import MilvusClient
-                self.client = MilvusClient(str(Path(db_uri).expanduser().resolve()))
-                print(f"[rider_identity] using Milvus Lite backend: {db_uri}")
-            else:
-                # Fallback: look for a SQLite-format .db with same stem
-                sqlite_path = self._resolve_sqlite_path(db_uri)
-                if sqlite_path is None:
-                    raise FileNotFoundError(
-                        f"milvus-lite not available and no SQLite face db found. "
-                        f"Tried: {db_uri} variants (.sqlite.db, _sqlite.db). "
-                        f"Run: python save_rider_faces_to_milvus.py --uri <path>.sqlite.db --rider-dir <photos>"
-                    )
-                from horse_id.sqlite_face_store import SQLiteFaceStore
-                self._sqlite_store = SQLiteFaceStore(sqlite_path, collection_name, dim)
-                n = self._sqlite_store.count()
-                print(f"[rider_identity] using SQLite fallback backend: {sqlite_path} ({n} entries)")
+            from pymilvus import MilvusClient
+
+            self.client = MilvusClient(str(Path(db_uri).expanduser().resolve()))
         else:
             from pymilvus import Collection, connections
+
             connections.connect(uri=db_uri)
             self.collection = Collection(name=collection_name)
             self.collection.load()
 
-    @staticmethod
-    def _resolve_sqlite_path(db_uri: str) -> str | None:
-        """Find a SQLite-format face db given a Milvus Lite URI.
-
-        Search order:
-          1. <stem>.sqlite.db   (e.g. rider.sqlite.db)
-          2. <stem>_sqlite.db   (e.g. rider_sqlite.db)
-          3. Original path if it looks like a plain SQLite file
-        """
-        base = Path(db_uri).expanduser().resolve()
-        stem = base.stem
-        parent = base.parent
-
-        candidates = [
-            parent / f"{stem}.sqlite.db",
-            parent / f"{stem}_sqlite.db",
-        ]
-        for c in candidates:
-            if c.is_file():
-                return str(c)
-
-        # Check if the original file itself is a valid SQLite db (not Milvus Lite protobuf)
-        if base.is_file():
-            try:
-                import sqlite3
-                conn = sqlite3.connect(str(base))
-                cur = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-                    ("rider_faces",),
-                )
-                row = cur.fetchone()
-                conn.close()
-                if row:
-                    # Check if it has our schema (embedding BLOB column)
-                    conn = sqlite3.connect(str(base))
-                    cur = conn.execute("PRAGMA table_info(rider_faces)")
-                    cols = {r[1] for r in cur.fetchall()}
-                    conn.close()
-                    if "embedding" in cols:
-                        return str(base)
-            except Exception:
-                pass
-        return None
-
     def _query_name(self, embedding: list[float]) -> tuple[str, float] | None:
-        # SQLite fallback
-        if self._sqlite_store is not None:
-            results = self._sqlite_store.search(embedding, limit=1)
-            if not results:
-                return None
-            hit = results[0]
-            score = float(hit["distance"])
-            if score < self.min_score:
-                return None
-            name = str(hit.get("name", ""))
-            if not name:
-                return None
-            return name, score
-
         if self.use_lite and self.client is not None:
             res = self.client.search(
                 collection_name=self.collection_name,
@@ -225,10 +137,6 @@ class _FaceIdentityBackend:
 
     def get_all_known_names(self) -> set[str]:
         """Return all distinct rider names registered in the face database."""
-        # SQLite fallback
-        if self._sqlite_store is not None:
-            return self._sqlite_store.get_all_names()
-
         names: set[str] = set()
         if self.use_lite and self.client is not None:
             results = self.client.query(
@@ -348,8 +256,7 @@ class RiderIdentityModule:
                     device=config.face_device,
                     models_dir=config.face_models_dir,
                 )
-            except Exception as _init_exc:
-                print(f"[rider_identity] _FaceIdentityBackend init FAILED: {_init_exc}")
+            except Exception:
                 self._face_backend = None
 
         self._known_face_names: set[str] = set()
