@@ -185,18 +185,29 @@ const modeLabel = (m: string | null | undefined) => {
   return m || '—';
 };
 
-const detailProfilingRows = computed(() => {
-  if (!selectedHistory.value) return [];
-  const p = selectedHistory.value.profiling || {};
-  const labels: Record<string, string> = {
-    read: '视频读取', yolo: 'YOLO+追踪', face_det: '人脸检测',
-    enhance: '图像增强', ocr: 'OCR识别', vlm: 'VLM回退',
-    rider_id: '骑手识别', viz: '结果渲染', write: '视频编码',
-  };
-  return Object.keys(labels)
+const PROFILING_LABELS: Record<string, string> = {
+  read: '视频读取', yolo: 'YOLO+追踪', face_det: '人脸检测',
+  enhance: '图像增强', ocr: 'OCR识别', vlm: 'VLM回退',
+  rider_id: '骑手识别', viz: '结果渲染', write: '视频编码',
+};
+const MAIN_KEYS = ['read', 'yolo', 'face_det', 'enhance', 'ocr', 'vlm', 'rider_id'];
+const PARALLEL_KEYS = ['viz', 'write'];
+
+const buildRows = (keys: string[], p: Record<string, number>) =>
+  keys
     .filter((k) => typeof p[k] === 'number' && p[k] > 0)
-    .map((k) => ({ key: k, label: labels[k], value: Number(p[k]) }));
+    .map((k) => ({ key: k, label: PROFILING_LABELS[k], value: Number(p[k]) }));
+
+const detailMainProfiling = computed(() => {
+  const p = selectedHistory.value?.profiling || {};
+  return buildRows(MAIN_KEYS, p);
 });
+const detailParallelProfiling = computed(() => {
+  const p = selectedHistory.value?.profiling || {};
+  return buildRows(PARALLEL_KEYS, p);
+});
+const detailMainSum = computed(() => detailMainProfiling.value.reduce((s, r) => s + r.value, 0));
+const detailParallelSum = computed(() => detailParallelProfiling.value.reduce((s, r) => s + r.value, 0));
 
 const startUpload = async () => {
   if (!videoFile.value) return;
@@ -631,15 +642,34 @@ onUnmounted(() => {
               </div>
             </div>
 
-            <div v-if="detailProfilingRows.length" class="detail-block">
-              <h3 class="detail-block-title">各阶段耗时占比</h3>
-              <ul class="detail-profiling-list">
-                <li v-for="row in detailProfilingRows" :key="row.key" class="detail-profiling-row">
-                  <span class="detail-profiling-label">{{ row.label }}</span>
-                  <div class="detail-profiling-track"><div class="detail-profiling-fill" :style="{ width: row.value + '%' }"></div></div>
-                  <span class="detail-profiling-value">{{ row.value.toFixed(1) }}%</span>
-                </li>
-              </ul>
+            <div v-if="detailMainProfiling.length || detailParallelProfiling.length" class="detail-block">
+              <h3 class="detail-block-title">各阶段耗时占比 <span class="detail-block-hint">(相对墙钟时间)</span></h3>
+              <div v-if="detailMainProfiling.length" class="detail-profiling-group">
+                <div class="detail-profiling-group-head">
+                  <span>主管线（串行）</span>
+                  <span class="detail-profiling-group-sum">{{ detailMainSum.toFixed(1) }}%</span>
+                </div>
+                <ul class="detail-profiling-list">
+                  <li v-for="row in detailMainProfiling" :key="row.key" class="detail-profiling-row">
+                    <span class="detail-profiling-label">{{ row.label }}</span>
+                    <div class="detail-profiling-track"><div class="detail-profiling-fill" :style="{ width: row.value + '%' }"></div></div>
+                    <span class="detail-profiling-value">{{ row.value.toFixed(1) }}%</span>
+                  </li>
+                </ul>
+              </div>
+              <div v-if="detailParallelProfiling.length" class="detail-profiling-group">
+                <div class="detail-profiling-group-head">
+                  <span>编码线程（与主管线并行）</span>
+                  <span class="detail-profiling-group-sum">{{ detailParallelSum.toFixed(1) }}%</span>
+                </div>
+                <ul class="detail-profiling-list">
+                  <li v-for="row in detailParallelProfiling" :key="row.key" class="detail-profiling-row">
+                    <span class="detail-profiling-label">{{ row.label }}</span>
+                    <div class="detail-profiling-track"><div class="detail-profiling-fill detail-profiling-fill-parallel" :style="{ width: row.value + '%' }"></div></div>
+                    <span class="detail-profiling-value">{{ row.value.toFixed(1) }}%</span>
+                  </li>
+                </ul>
+              </div>
             </div>
 
             <details class="json-details">
@@ -1680,5 +1710,32 @@ onUnmounted(() => {
   border-radius: 3px;
   transition: width 0.3s;
 }
+.detail-profiling-fill-parallel {
+  background: linear-gradient(90deg, #0ea5e9, #38bdf8);
+}
 .detail-profiling-value { text-align: right; color: #e2e8f0; font-variant-numeric: tabular-nums; }
+.detail-block-hint {
+  font-size: 0.68rem;
+  font-weight: 500;
+  color: #64748b;
+  margin-left: 0.35rem;
+  letter-spacing: 0;
+}
+.detail-profiling-group + .detail-profiling-group { margin-top: 0.75rem; }
+.detail-profiling-group-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 0 0.1rem 0.35rem;
+  font-size: 0.7rem;
+  color: #94a3b8;
+  font-weight: 600;
+  border-bottom: 1px dashed #1e293b;
+  margin-bottom: 0.4rem;
+}
+.detail-profiling-group-sum {
+  color: #e2e8f0;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+}
 </style>
