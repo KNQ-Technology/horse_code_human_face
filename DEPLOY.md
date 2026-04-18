@@ -50,19 +50,22 @@ horse_code_human_face/
 
 ### 2.1 操作系统
 
-Linux（推荐 Ubuntu 20.04+）。macOS 也可运行但未充分测试。
+- **Linux**（推荐 Ubuntu 20.04+）— 功能最完整
+- **Windows 10/11** — 完整支持（见下方 Windows 特别说明）
+- macOS 可运行但未充分测试
 
 ### 2.2 系统依赖
 
 | 软件 | 最低版本 | 用途 |
 |---|---|---|
-| Python | 3.10+ | 后端运行时 |
+| Python | 3.10+（推荐 3.11） | 后端运行时 |
 | Node.js | 18+ | 前端构建 |
 | npm | 8+ | 前端包管理 |
 | FFmpeg | 4.0+ | 视频 H.264 编码（可选但强烈推荐） |
 | Git | 2.0+ | 版本控制 |
+| NVIDIA 驱动 | ≥ 525（对应 CUDA 12.x） | GPU 加速必需 |
 
-**安装系统依赖（Ubuntu）：**
+### 2.3 Ubuntu 安装系统依赖
 
 ```bash
 # Python 3.10+（Ubuntu 22.04 自带）
@@ -79,6 +82,29 @@ sudo apt install -y ffmpeg
 # 其他编译依赖（部分 Python 包可能需要）
 sudo apt install -y build-essential libgl1-mesa-glx libglib2.0-0
 ```
+
+### 2.4 Windows 安装系统依赖
+
+推荐工具链：
+
+| 软件 | 下载方式 |
+|---|---|
+| Python 3.11 | https://www.python.org/downloads/ （勾选 "Add Python to PATH"） |
+| Node.js 18 LTS | https://nodejs.org/ |
+| FFmpeg | https://www.gyan.dev/ffmpeg/builds/ （将 `ffmpeg.exe` 所在 `bin/` 加入 PATH） |
+| Git for Windows | https://git-scm.com/download/win |
+| NVIDIA 驱动 | GeForce Experience 或 https://www.nvidia.com/Download/index.aspx |
+
+**验证安装：** 打开 PowerShell 执行
+
+```powershell
+python --version           # Python 3.11.x
+node --version             # v18.x+
+ffmpeg -version            # ffmpeg version 4.x+
+nvidia-smi                 # 显示 GPU 信息与驱动版本
+```
+
+> 所有命令在 **PowerShell** 中执行（非 cmd.exe）。项目已在 Windows 11 + RTX 4070 + Python 3.11 + CUDA 13.1 驱动环境下验证通过。
 
 ---
 
@@ -98,10 +124,21 @@ git checkout test
 
 ### 4.1 创建 Python 虚拟环境
 
+**Ubuntu / macOS：**
 ```bash
 cd backend
 python3 -m venv venv
 source venv/bin/activate
+```
+
+**Windows（PowerShell）：**
+```powershell
+cd backend
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+
+# 如遇到 "禁止运行脚本" 错误，先执行（仅一次）：
+# Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
 ```
 
 ### 4.2 安装 Python 依赖
@@ -110,7 +147,41 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-这会安装全部依赖，包括 FastAPI、Ultralytics (YOLO)、PaddleOCR、ONNX Runtime 等。首次安装可能需要 3-5 分钟。
+这会安装全部基础依赖，包括 FastAPI、Ultralytics (YOLO)、PaddleOCR、ONNX Runtime 等。首次安装可能需要 3-5 分钟。
+
+#### 4.2.1 GPU 加速包（强烈推荐）
+
+本项目针对 GPU 做了深度优化，OCR 和人脸检测在 GPU 上比 CPU 快 10-60 倍。**不装 GPU 包会导致处理速度慢一个数量级**。
+
+**Ubuntu：**
+```bash
+# PaddlePaddle GPU 版（替换 requirements.txt 中的 paddlepaddle）
+pip uninstall -y paddlepaddle
+pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+
+# onnxruntime GPU 版
+pip uninstall -y onnxruntime
+pip install onnxruntime-gpu==1.23.0
+```
+
+**Windows（PowerShell）：**
+```powershell
+# PaddlePaddle GPU 版
+pip uninstall -y paddlepaddle
+pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+
+# onnxruntime GPU 版
+pip uninstall -y onnxruntime
+pip install onnxruntime-gpu==1.23.0
+
+# 重要：Windows 下 paddlepaddle-gpu 会拉入 nvidia-cudnn-cu12 等独立 CUDA 包，
+# 它们与 PyTorch 自带的 CUDA 运行时冲突。需要卸载：
+pip uninstall -y nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 `
+                  nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 `
+                  nvidia-cusparse-cu12 nvidia-nvjitlink-cu12
+```
+
+> **Windows 特别说明**：已在 `backend/_nvidia_dll_fix.py` 中处理了 cuDNN DLL 加载路径问题（复用 `torch/lib` 目录下的 CUDA 库），`main.py` 会在启动时自动加载，无需手动配置 PATH。
 
 ### 4.3 模型文件
 
@@ -123,12 +194,31 @@ pip install -r requirements.txt
 
 人脸识别模型（可选）需手动放置：
 
-| 模型 | 位置 |
-|---|---|
-| `det_10g.onnx` (SCRFD 人脸检测) | `backend/horse_id/models/` |
-| `w600k_r50.onnx` (ArcFace 人脸识别) | `backend/horse_id/models/` |
+| 模型 | 位置 | 大小 |
+|---|---|---|
+| `det_10g.onnx` (SCRFD 人脸检测) | `backend/horse_id/models/` | ~17 MB |
+| `w600k_r50.onnx` (ArcFace 人脸识别) | `backend/horse_id/models/` | ~175 MB |
 
 > 如果不需要人脸识别功能，无需放置这些文件，系统会自动禁用该模块。
+
+#### 4.3.1 人脸特征库（rider.db）
+
+骑手识别需要预先录入的人脸特征库。两种格式：
+
+| 格式 | 后缀 | 生成方式 | 平台 |
+|---|---|---|---|
+| Milvus Lite | `rider.db` | `python save_rider_faces_to_milvus.py --uri rider.db --rider-dir <照片目录>` | 仅 Ubuntu |
+| 标准 SQLite | `rider.sqlite.db` | 同上（Windows 自动使用） 或从 Milvus Lite 迁移 | Windows + Ubuntu |
+
+**Windows 必须使用 SQLite 格式**（milvus-lite 不支持 Windows）。如果已有 Ubuntu 生成的 `rider.db`，拷贝到 Windows 后执行迁移：
+
+```powershell
+cd backend
+python migrate_milvus_to_sqlite.py --src rider.db
+# 输出: rider.sqlite.db（项目会自动加载）
+```
+
+系统会在 `rider_identity` 模块初始化时自动检测：Ubuntu 优先用 `rider.db`，Windows 自动降级到 `rider.sqlite.db`。
 
 ### 4.4 配置文件
 
@@ -161,6 +251,7 @@ vlm_fallback:
 
 ### 4.6 启动后端
 
+**Ubuntu / macOS：**
 ```bash
 cd backend
 source venv/bin/activate
@@ -169,19 +260,34 @@ source venv/bin/activate
 python main.py
 
 # 带环境变量启动（启用人脸识别 + VLM）
-FACE_DB_URI=./face_db.db \
+FACE_DB_URI=./rider.db \
 VLM_API_KEY=sk-你的密钥 \
 PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True \
+python main.py
+```
+
+**Windows（PowerShell）：**
+```powershell
+cd backend
+.\venv\Scripts\Activate.ps1
+
+# 基本启动
+python main.py
+
+# 带环境变量启动
+$env:FACE_DB_URI = "./rider.sqlite.db"
+$env:VLM_API_KEY = "sk-你的密钥"
+$env:PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK = "True"
 python main.py
 ```
 
 启动成功后输出：
 
 ```
-INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
+INFO:     Uvicorn running on http://0.0.0.0:8002 (Press CTRL+C to quit)
 ```
 
-**后端监听 `http://0.0.0.0:8001`。**
+**后端监听 `http://0.0.0.0:8002`。** 可通过 `PORT` 环境变量修改端口。
 
 ---
 
@@ -189,8 +295,9 @@ INFO:     Uvicorn running on http://0.0.0.0:8001 (Press CTRL+C to quit)
 
 ### 5.1 开发模式（前后端分离）
 
-开发模式下前端 Vite 开发服务器独立运行，通过 CORS 与后端通信。
+开发模式下前端 Vite 开发服务器独立运行，并通过 Vite 的 `/api` 代理转发到后端。
 
+**Ubuntu / macOS / Windows（命令相同）：**
 ```bash
 cd vue
 npm install
@@ -200,13 +307,19 @@ npm run dev
 启动成功后输出：
 
 ```
-VITE vX.X.X ready
-➜  Local:   http://localhost:5173/
+VITE v7.3.1  ready in 400 ms
+
+➜  Local:   http://localhost:8001/
+➜  Network: http://<局域网 IP>:8001/
 ```
 
-浏览器访问 `http://localhost:5173` 即可。前端会自动请求 `http://<当前主机名>:8001` 的后端 API（可通过环境变量 `VITE_API_BASE` 覆盖）。
+浏览器访问 `http://localhost:8001` 即可。Vite 会自动将 `/api/*` 和 `/videos/*` 请求转发到后端 `http://localhost:8002`。
 
-> **注意**：开发模式需要同时运行后端（端口 8001）和前端开发服务器（端口 5173）。
+> **端口约定**（由 `vue/vite.config.ts` 定义）：
+> - 前端 Vite：`8001`
+> - 后端 FastAPI：`8002`（代理目标）
+>
+> **注意**：开发模式需要同时运行后端（端口 8002）和前端开发服务器（端口 8001），顺序随意。
 
 ### 5.2 生产模式（一体化部署）
 
@@ -224,13 +337,21 @@ npm run build
 
 **第二步：启动后端**
 
+Ubuntu：
 ```bash
 cd backend
 source venv/bin/activate
 python main.py
 ```
 
-浏览器访问 `http://<服务器IP>:8001` 即可使用完整系统。后端会自动托管 `vue/dist/` 下的静态文件。
+Windows：
+```powershell
+cd backend
+.\venv\Scripts\Activate.ps1
+python main.py
+```
+
+浏览器访问 `http://<服务器IP>:8002` 即可使用完整系统。后端会自动托管 `vue/dist/` 下的静态文件。
 
 ---
 
@@ -298,7 +419,7 @@ GET /api/status?task_id=<uuid>
   "data": {
     "status": "completed",
     "progress": 100,
-    "processed_video_url": "http://localhost:8001/videos/processed_xxx.mp4",
+    "processed_video_url": "http://localhost:8002/videos/processed_xxx.mp4",
     "result": {
       "filename": "race.mp4",
       "duration": "01:30",
@@ -387,47 +508,144 @@ sudo apt install -y ffmpeg
 需要三步：
 
 1. 将 ONNX 模型文件（`det_10g.onnx`、`w600k_r50.onnx`）放入 `backend/horse_id/models/`
-2. 准备人脸向量库（使用 `save_rider_faces_to_milvus.py` 入库）
-3. 启动时指定环境变量：`FACE_DB_URI=./face_db.db python main.py`
+2. 准备人脸向量库：
+   - Ubuntu：`python save_rider_faces_to_milvus.py --uri rider.db --rider-dir <照片目录>`
+   - Windows：同上命令自动生成 `rider.sqlite.db`；或从已有 `rider.db` 迁移：`python migrate_milvus_to_sqlite.py --src rider.db`
+3. `pipeline.yaml` 已默认启用（`face_db_uri: "rider.db"`），直接启动即可
 
 ### Q: 如何在远程服务器部署后从本地访问？
 
-后端默认监听 `0.0.0.0:8001`，可通过服务器 IP 直接访问。如果需要修改端口：
+后端默认监听 `0.0.0.0:8002`，可通过服务器 IP 直接访问。修改端口：
 
-```python
-# backend/main.py 最后一行
-uvicorn.run(app, host="0.0.0.0", port=你的端口)
+```bash
+# Ubuntu
+PORT=9000 python main.py
+```
+```powershell
+# Windows
+$env:PORT = "9000"; python main.py
 ```
 
-前端开发模式下 API 地址默认为 `http://<当前主机名>:8001`（通过 `VITE_API_BASE` 环境变量可覆盖），远程部署建议使用**生产模式**（前端构建后由后端托管）。
+远程部署建议使用**生产模式**（前端构建后由后端托管，只开一个端口）。
+
+### Q: Windows 下启动报错 `[WinError 127] 找不到指定的程序. Error loading cudnn_cnn64_9.dll`？
+
+这是 PaddleOCR GPU 版在 Windows 下的 cuDNN 加载问题。项目已通过 `backend/_nvidia_dll_fix.py` 自动修复 — 它复用了 PyTorch 自带的 CUDA 库。如果仍报错：
+
+1. 确认同时装了 `torch`（PyTorch 会带完整 CUDA 运行时）
+2. 确认已卸载独立的 nvidia-* 包（见 4.2.1 节命令）
+3. 确认 `backend/main.py` 和 `backend/processor.py` 顶部都 `import _nvidia_dll_fix`
+
+### Q: Windows 下启动报错 `No module named 'milvus_lite'`？
+
+`milvus-lite` 不支持 Windows。系统会自动降级到 SQLite 后端，但需要 `rider.sqlite.db`（而非 `rider.db`）。执行迁移：
+
+```powershell
+cd backend
+python migrate_milvus_to_sqlite.py --src rider.db
+```
+
+### Q: Windows 下 PowerShell 报错 `无法加载文件 Activate.ps1，因为在此系统上禁止运行脚本`？
+
+一次性放开当前用户的脚本执行：
+
+```powershell
+Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned
+# 然后再运行:
+.\venv\Scripts\Activate.ps1
+```
+
+### Q: 端口 8001 或 8002 被占用？
+
+查找并终止占用进程：
+
+```powershell
+# Windows
+netstat -ano | findstr :8002
+taskkill /F /PID <PID>
+```
+```bash
+# Ubuntu
+lsof -i :8002
+kill -9 <PID>
+```
+
+或者通过 `PORT` 环境变量改用其他端口（后端），前端端口在 `vue/vite.config.ts` 的 `server.port` 修改。
 
 ### Q: GPU 加速？
 
 - **YOLO**：安装 `torch` 的 CUDA 版本即可自动使用 GPU
-- **PaddleOCR**：安装 `paddlepaddle-gpu` 替代 `paddlepaddle`
-- **ONNX (人脸)**：安装 `onnxruntime-gpu` 替代 `onnxruntime`
+- **PaddleOCR**：安装 `paddlepaddle-gpu` 替代 `paddlepaddle`（见 4.2.1）
+- **ONNX (人脸)**：安装 `onnxruntime-gpu` 替代 `onnxruntime`（见 4.2.1）
+
+装完后在 `pipeline.yaml` 中：
+```yaml
+detector:
+  device: "0"        # YOLO 用 GPU
+rider_identity:
+  face_device: "cuda"  # SCRFD/ArcFace 用 GPU
+```
+OCR 在代码中硬编码用 `gpu:0`，只要装了 `paddlepaddle-gpu` 就自动生效。
 
 ---
 
 ## 10. 快速启动（TL;DR）
 
-```bash
-# 1. 切换分支
-cd horse_code_human_face
-git checkout test
+### Ubuntu
 
-# 2. 后端
+```bash
+# 1. 后端（新开一个终端）
 cd backend
 python3 -m venv venv
 source venv/bin/activate
 pip install -r requirements.txt
-python main.py                # 后端运行在 http://0.0.0.0:8001
+pip uninstall -y paddlepaddle onnxruntime
+pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+pip install onnxruntime-gpu==1.23.0
+python main.py                # 后端: http://0.0.0.0:8002
 
-# 3. 前端（新开终端）
+# 2. 前端（新开一个终端）
 cd vue
 npm install
-npm run build                 # 构建前端
+npm run dev                   # 前端: http://localhost:8001
 
-# 4. 访问
-# 浏览器打开 http://localhost:8001
+# 3. 浏览器打开 http://localhost:8001
 ```
+
+### Windows（PowerShell）
+
+```powershell
+# 1. 后端（新开一个 PowerShell 窗口）
+cd backend
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+
+# GPU 加速包（强烈推荐）
+pip uninstall -y paddlepaddle onnxruntime
+pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+pip install onnxruntime-gpu==1.23.0
+
+# 卸载与 torch 冲突的独立 CUDA 包
+pip uninstall -y nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12 `
+                  nvidia-cufft-cu12 nvidia-curand-cu12 nvidia-cusolver-cu12 `
+                  nvidia-cusparse-cu12 nvidia-nvjitlink-cu12
+
+# 如果已有 Ubuntu 的 rider.db，迁移到 SQLite 格式
+python migrate_milvus_to_sqlite.py --src rider.db
+
+python main.py                # 后端: http://0.0.0.0:8002
+
+# 2. 前端（新开一个 PowerShell 窗口）
+cd vue
+npm install
+npm run dev                   # 前端: http://localhost:8001
+
+# 3. 浏览器打开 http://localhost:8001
+```
+
+### 验证启动成功
+
+- 前端页面能打开 → Vite 正常
+- 页面底部监控条显示 CPU/GPU 数据 → 后端 API 正常
+- 上传视频后日志出现 `[rider_identity] enabled`（若放了人脸库） → 全链路正常
