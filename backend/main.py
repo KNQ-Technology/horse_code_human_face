@@ -7,9 +7,11 @@ import time
 import uuid
 import os
 import re
+import json
 import shutil
 import threading
 from collections import deque
+from pathlib import Path
 from typing import Dict
 
 from processor import process_video
@@ -238,6 +240,98 @@ async def get_profiling():
         if t.get("status") in ("completed", "error") and "profiling" in t:
             return _build_profiling_response(tid, t)
     return {"code": 200, "data": None}
+
+
+_SUMMARY_SUFFIX = "_summary.json"
+_FRAMES_SUFFIX = "_frames.json"
+_UUID_RE = re.compile(
+    r"^processed_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})_(.+)$"
+)
+
+
+def _parse_task_id_and_stem(stem: str) -> tuple[str, str] | None:
+    m = _UUID_RE.match(stem)
+    if not m:
+        return None
+    return m.group(1), m.group(2)
+
+
+def _read_summary(path: Path) -> dict | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def _history_entry(summary_path: Path, full: bool = False) -> dict | None:
+    stem = summary_path.name[: -len(_SUMMARY_SUFFIX)]
+    parsed = _parse_task_id_and_stem(stem)
+    if not parsed:
+        return None
+    task_id, original_stem = parsed
+    data = _read_summary(summary_path) or {}
+
+    processed_mp4 = summary_path.with_name(f"{stem}.mp4")
+    upload_candidates = [
+        Path(UPLOAD_DIR) / f"{task_id}_{original_stem}.mp4",
+        Path(UPLOAD_DIR) / data.get("filename", ""),
+    ]
+    upload_path = next((p for p in upload_candidates if p.name and p.exists()), None)
+    original_name = data.get("filename") or (upload_path.name if upload_path else f"{original_stem}.mp4")
+    if original_name.startswith(f"{task_id}_"):
+        original_name = original_name[len(task_id) + 1 :]
+
+    entry = {
+        "task_id": data.get("task_id") or task_id,
+        "original_filename": original_name,
+        "processed_at": data.get("processed_at"),
+        "mtime": summary_path.stat().st_mtime,
+        "duration": data.get("duration"),
+        "resolution": data.get("resolution"),
+        "mode": data.get("mode"),
+        "process_duration_seconds": data.get("process_duration_seconds"),
+        "detection_count": len(data.get("detections") or []),
+        "processed_video_url": f"/videos/{processed_mp4.name}" if processed_mp4.exists() else None,
+        "original_video_url": f"/videos/upload/{upload_path.name}" if upload_path else None,
+        "summary_url": f"/api/history/{task_id}",
+    }
+    if full:
+        entry["detections"] = data.get("detections") or []
+        entry["profiling"] = data.get("profiling") or {}
+        entry["stage_devices"] = data.get("stage_devices") or {}
+    return entry
+
+
+@app.get("/api/history")
+async def list_history(limit: int = 200):
+    root = Path(VIDEOS_DIR)
+    if not root.is_dir():
+        return {"code": 200, "data": {"items": [], "total": 0}}
+    summaries = sorted(
+        root.glob(f"processed_*{_SUMMARY_SUFFIX}"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    items: list[dict] = []
+    for p in summaries:
+        entry = _history_entry(p, full=False)
+        if entry:
+            items.append(entry)
+        if len(items) >= max(1, limit):
+            break
+    return {"code": 200, "data": {"items": items, "total": len(items)}}
+
+
+@app.get("/api/history/{task_id}")
+async def get_history_detail(task_id: str):
+    root = Path(VIDEOS_DIR)
+    matches = list(root.glob(f"processed_{task_id}_*{_SUMMARY_SUFFIX}"))
+    if not matches:
+        raise HTTPException(status_code=404, detail="history not found")
+    entry = _history_entry(matches[0], full=True)
+    if not entry:
+        raise HTTPException(status_code=404, detail="history not found")
+    return {"code": 200, "data": entry}
 
 
 @app.get("/api/system/metrics")

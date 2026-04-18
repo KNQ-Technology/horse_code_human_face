@@ -1146,13 +1146,18 @@ def process_video(
             f"汇总条数={len(summary_detections)}"
         )
 
+    _final_task = tasks.get(task_id, {}) or {}
     result = {
+        "task_id": task_id,
         "filename": os.path.basename(video_path),
         "duration": duration_str,
         "resolution": resolution_str,
         "processed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "process_duration_seconds": round(time.perf_counter() - start_ts, 3),
         "detections": summary_detections,
         "mode": mode,
+        "profiling": dict(_final_task.get("profiling") or {}),
+        "stage_devices": dict(_final_task.get("stage_devices") or {}),
     }
 
     output_stem = Path(output_video_path).stem

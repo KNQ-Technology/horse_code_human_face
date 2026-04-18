@@ -52,11 +52,14 @@ runtime:
   direction_min_frames: 5
   direction_min_displacement: 30.0
 
-# 骑手人脸：需要 (1) 可用的 Milvus Lite .db 路径 (2) horse_id/models 下 SCRFD/ArcFace ONNX
-# 若 face_db_uri 指向不存在路径（如他人机器上的 /home/...），初始化会失败且整条人脸链路关闭（只保号码 OCR）。
-# Windows：请改为本机 .db，或设置环境变量 FACE_DB_URI；无独显时请 face_device: cpu
+# 骑手人脸：需要 (1) 可用的人脸向量库路径 (2) horse_id/models 下 SCRFD/ArcFace ONNX
+# 后端自动识别两种格式：
+#   - *.sqlite / *.sqlite.db：纯 SQLite（全平台可用，Windows 首选）
+#   - 其他本地路径：Milvus Lite（仅 Linux，Windows 不支持）
+# 如需迁移：在 Linux 下执行 `python migrate_milvus_to_sqlite.py --src rider.db`
+# 若路径不存在则整条人脸链路关闭（只保号码 OCR）；无独显时请 face_device: cpu
 rider_identity:
-  face_db_uri: "rider.db"
+  face_db_uri: "rider.sqlite.db"
   face_collection: "rider_faces"
   face_dim: 512
   face_min_score: 0.3

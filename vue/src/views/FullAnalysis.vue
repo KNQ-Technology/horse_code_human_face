@@ -1,8 +1,28 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
-import { Upload, FileVideo, CheckCircle, Loader2, PlayCircle, History, Plus, Info, Camera, CameraOff } from 'lucide-vue-next';
+import { Upload, FileVideo, CheckCircle, Loader2, PlayCircle, History, Plus, Info, Camera, CameraOff, Clock, X, RefreshCw } from 'lucide-vue-next';
 import axios from 'axios';
+
+type HistoryItem = {
+  task_id: string;
+  original_filename: string;
+  processed_at: string | null;
+  mtime: number;
+  duration: string | null;
+  resolution: string | null;
+  mode: string | null;
+  process_duration_seconds: number | null;
+  detection_count: number;
+  processed_video_url: string | null;
+  original_video_url: string | null;
+  summary_url: string;
+};
+type HistoryDetail = HistoryItem & {
+  detections: Array<{ timestamp: string; horse_id?: string; person_name?: string; confidence?: string }>;
+  profiling: Record<string, number>;
+  stage_devices: Record<string, string>;
+};
 
 const route = useRoute();
 const API_BASE = import.meta.env.VITE_API_BASE || window.location.origin;
@@ -55,6 +75,7 @@ const checkStatus = async () => {
         processedVideoUrl.value = videoPath.startsWith('http') ? videoPath : `${API_BASE}${videoPath}`;
         videoMode.value = 'processed';
         processingResult.value = data.result;
+        fetchHistory();
       } else if (data.status === 'error') {
         errorMessage.value = data.message || '后端处理时出错';
       } else if (data.status === 'queued') {
@@ -94,6 +115,83 @@ const resetUpload = () => {
   queuePosition.value = 0;
 };
 
+const historyItems = ref<HistoryItem[]>([]);
+const historyLoading = ref(false);
+const historyError = ref('');
+const selectedHistory = ref<HistoryDetail | null>(null);
+const detailVideoMode = ref<'original' | 'processed'>('processed');
+let historyTimer: ReturnType<typeof setInterval> | undefined;
+
+const toAbsUrl = (u: string | null) => (!u ? null : (u.startsWith('http') ? u : `${API_BASE}${u}`));
+
+const fetchHistory = async () => {
+  historyLoading.value = true;
+  try {
+    const r = await axios.get(`${API_BASE}/api/history?limit=200`);
+    if (r.data?.code === 200) {
+      historyItems.value = (r.data.data.items as HistoryItem[]) || [];
+      historyError.value = '';
+    }
+  } catch (e) {
+    historyError.value = '加载历史失败';
+  } finally {
+    historyLoading.value = false;
+  }
+};
+
+const openHistoryDetail = async (item: HistoryItem) => {
+  try {
+    const r = await axios.get(`${API_BASE}${item.summary_url}`);
+    if (r.data?.code === 200) {
+      selectedHistory.value = r.data.data as HistoryDetail;
+      detailVideoMode.value = selectedHistory.value.processed_video_url ? 'processed' : 'original';
+    }
+  } catch (e) {
+    // fall back to list entry with empty details
+    selectedHistory.value = { ...item, detections: [], profiling: {}, stage_devices: {} };
+    detailVideoMode.value = item.processed_video_url ? 'processed' : 'original';
+  }
+};
+
+const closeHistoryDetail = () => { selectedHistory.value = null; };
+
+const formatDuration = (s: number | null | undefined) => {
+  if (s == null || !Number.isFinite(s)) return '—';
+  if (s < 60) return `${s.toFixed(1)}s`;
+  const m = Math.floor(s / 60);
+  const r = (s - m * 60).toFixed(1);
+  return `${m}m${r}s`;
+};
+
+const formatRelTime = (mtime: number) => {
+  const now = Date.now() / 1000;
+  const diff = now - mtime;
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+  return `${Math.floor(diff / 86400)} 天前`;
+};
+
+const modeLabel = (m: string | null | undefined) => {
+  if (m === 'full') return '骑手识别';
+  if (m === 'simple') return '号码识别';
+  if (m === 'face') return '仅人脸';
+  return m || '—';
+};
+
+const detailProfilingRows = computed(() => {
+  if (!selectedHistory.value) return [];
+  const p = selectedHistory.value.profiling || {};
+  const labels: Record<string, string> = {
+    read: '视频读取', yolo: 'YOLO+追踪', face_det: '人脸检测',
+    enhance: '图像增强', ocr: 'OCR识别', vlm: 'VLM回退',
+    rider_id: '骑手识别', viz: '结果渲染', write: '视频编码',
+  };
+  return Object.keys(labels)
+    .filter((k) => typeof p[k] === 'number' && p[k] > 0)
+    .map((k) => ({ key: k, label: labels[k], value: Number(p[k]) }));
+});
+
 const startUpload = async () => {
   if (!videoFile.value) return;
 
@@ -121,6 +219,14 @@ const startUpload = async () => {
     processingStatus.value = 'error';
   }
 };
+
+onMounted(() => {
+  fetchHistory();
+  historyTimer = setInterval(fetchHistory, 15000);
+});
+onUnmounted(() => {
+  if (historyTimer !== undefined) clearInterval(historyTimer);
+});
 </script>
 
 <template>
@@ -370,6 +476,7 @@ const startUpload = async () => {
               </details>
             </div>
 
+
             <div v-else-if="processingStatus === 'idle'" class="empty-state">
               <div class="empty-icon-wrapper">
                 <FileVideo :size="48" />
@@ -399,6 +506,145 @@ const startUpload = async () => {
           </div>
         </div>
       </section>
+
+      <section class="panel history-panel">
+        <div class="panel-header history-panel-header">
+          <h2 class="panel-title">
+            <History :size="16" class="history-title-icon" />
+            分析记录
+            <span class="history-count" v-if="historyItems.length">{{ historyItems.length }}</span>
+          </h2>
+          <button class="history-refresh" :disabled="historyLoading" @click="fetchHistory" title="刷新">
+            <RefreshCw :size="14" :class="{ 'animate-spin': historyLoading }" />
+          </button>
+        </div>
+        <div class="panel-body history-panel-body">
+          <div v-if="historyError" class="history-error">{{ historyError }}</div>
+          <div v-else-if="!historyItems.length && !historyLoading" class="history-empty">
+            <FileVideo :size="32" />
+            <p>暂无历史记录</p>
+          </div>
+          <ul v-else class="history-list">
+            <li
+              v-for="item in historyItems"
+              :key="item.task_id"
+              class="history-item"
+              @click="openHistoryDetail(item)"
+            >
+              <div class="history-item-top">
+                <span class="history-filename" :title="item.original_filename">{{ item.original_filename }}</span>
+                <span class="history-mode" :class="'mode-' + item.mode">{{ modeLabel(item.mode) }}</span>
+              </div>
+              <div class="history-item-meta">
+                <span class="history-time"><Clock :size="11" /> {{ formatRelTime(item.mtime) }}</span>
+                <span v-if="item.duration" class="history-dot">·</span>
+                <span v-if="item.duration">{{ item.duration }}</span>
+                <span v-if="item.resolution" class="history-dot">·</span>
+                <span v-if="item.resolution">{{ item.resolution }}</span>
+              </div>
+              <div class="history-item-bottom">
+                <span class="history-chip">检测 {{ item.detection_count }}</span>
+                <span v-if="item.process_duration_seconds != null" class="history-chip chip-time">
+                  耗时 {{ formatDuration(item.process_duration_seconds) }}
+                </span>
+              </div>
+            </li>
+          </ul>
+        </div>
+      </section>
+    </div>
+
+    <div v-if="selectedHistory" class="detail-modal-backdrop" @click.self="closeHistoryDetail">
+      <div class="detail-modal">
+        <div class="detail-modal-header">
+          <div class="detail-modal-title">
+            <FileVideo :size="18" />
+            <span>{{ selectedHistory.original_filename }}</span>
+            <span class="detail-mode-tag" :class="'mode-' + selectedHistory.mode">{{ modeLabel(selectedHistory.mode) }}</span>
+          </div>
+          <button class="detail-close" @click="closeHistoryDetail" title="关闭"><X :size="18" /></button>
+        </div>
+        <div class="detail-modal-body">
+          <div class="detail-video-section">
+            <div class="detail-video-toggle">
+              <button
+                :class="{ active: detailVideoMode === 'original', disabled: !selectedHistory.original_video_url }"
+                :disabled="!selectedHistory.original_video_url"
+                @click="detailVideoMode = 'original'"
+              ><History :size="14" /> 原视频</button>
+              <button
+                :class="{ active: detailVideoMode === 'processed', disabled: !selectedHistory.processed_video_url }"
+                :disabled="!selectedHistory.processed_video_url"
+                @click="detailVideoMode = 'processed'"
+              ><PlayCircle :size="14" /> 分析视频</button>
+            </div>
+            <video
+              v-if="detailVideoMode === 'original' && selectedHistory.original_video_url"
+              :src="toAbsUrl(selectedHistory.original_video_url) || undefined"
+              :key="'orig-' + selectedHistory.task_id"
+              controls
+              class="detail-video"
+            ></video>
+            <video
+              v-else-if="detailVideoMode === 'processed' && selectedHistory.processed_video_url"
+              :src="toAbsUrl(selectedHistory.processed_video_url) || undefined"
+              :key="'proc-' + selectedHistory.task_id"
+              controls
+              class="detail-video"
+            ></video>
+            <div v-else class="detail-video-missing">视频文件不存在</div>
+          </div>
+
+          <div class="detail-info-section">
+            <div class="detail-meta-grid">
+              <div class="meta-item"><span class="label">完成时间</span><span class="value">{{ selectedHistory.processed_at || '—' }}</span></div>
+              <div class="meta-item"><span class="label">视频时长</span><span class="value">{{ selectedHistory.duration || '—' }}</span></div>
+              <div class="meta-item"><span class="label">分辨率</span><span class="value">{{ selectedHistory.resolution || '—' }}</span></div>
+              <div class="meta-item"><span class="label">处理耗时</span><span class="value">{{ formatDuration(selectedHistory.process_duration_seconds) }}</span></div>
+              <div class="meta-item"><span class="label">分析模式</span><span class="value">{{ modeLabel(selectedHistory.mode) }}</span></div>
+              <div class="meta-item"><span class="label">检测条数</span><span class="value">{{ selectedHistory.detection_count }}</span></div>
+            </div>
+
+            <div v-if="selectedHistory.detections.length" class="detail-block">
+              <h3 class="detail-block-title">检测结果</h3>
+              <div class="table-container">
+                <table class="data-table">
+                  <thead>
+                    <tr>
+                      <th>时间</th>
+                      <th>目标名称</th>
+                      <th>置信度</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(d, i) in selectedHistory.detections" :key="i">
+                      <td>{{ d.timestamp }}</td>
+                      <td>{{ d.person_name || d.horse_id || '—' }}</td>
+                      <td class="conf-cell">{{ d.confidence || '—' }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            <div v-if="detailProfilingRows.length" class="detail-block">
+              <h3 class="detail-block-title">各阶段耗时占比</h3>
+              <ul class="detail-profiling-list">
+                <li v-for="row in detailProfilingRows" :key="row.key" class="detail-profiling-row">
+                  <span class="detail-profiling-label">{{ row.label }}</span>
+                  <div class="detail-profiling-track"><div class="detail-profiling-fill" :style="{ width: row.value + '%' }"></div></div>
+                  <span class="detail-profiling-value">{{ row.value.toFixed(1) }}%</span>
+                </li>
+              </ul>
+            </div>
+
+            <details class="json-details">
+              <summary>查看原始 JSON</summary>
+              <pre class="json-block">{{ JSON.stringify(selectedHistory, null, 2) }}</pre>
+            </details>
+          </div>
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -583,9 +829,20 @@ const startUpload = async () => {
 
 .content-grid {
   display: grid;
-  grid-template-columns: 1.6fr 1fr;
-  gap: 2rem;
+  grid-template-columns: 1.6fr 1fr 0.9fr;
+  gap: 1.25rem;
   height: calc(100vh - 128px);
+}
+
+@media (max-width: 1280px) {
+  .content-grid {
+    grid-template-columns: 1.4fr 1fr;
+  }
+  .history-panel {
+    grid-column: 1 / -1;
+    height: auto;
+    max-height: 320px;
+  }
 }
 
 .panel {
@@ -1062,4 +1319,342 @@ const startUpload = async () => {
 ::-webkit-scrollbar-thumb:hover {
   background: #334155;
 }
+
+/* --- history panel (right column) --- */
+.history-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+.history-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.history-title-icon { color: #a78bfa; vertical-align: -2px; margin-right: 0.35rem; }
+.history-count {
+  display: inline-block;
+  margin-left: 0.4rem;
+  padding: 1px 7px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  color: #a78bfa;
+  background: rgba(167, 139, 250, 0.12);
+  border: 1px solid rgba(167, 139, 250, 0.3);
+  border-radius: 10px;
+  vertical-align: 2px;
+}
+.history-refresh {
+  background: transparent;
+  border: 1px solid #1e293b;
+  color: #94a3b8;
+  padding: 0.3rem;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s;
+}
+.history-refresh:hover:not(:disabled) { color: #e2e8f0; border-color: #334155; }
+.history-refresh:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.history-panel-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0.25rem 0.5rem 0.75rem;
+}
+.history-error, .history-empty {
+  color: #64748b;
+  text-align: center;
+  padding: 2rem 1rem;
+  font-size: 0.85rem;
+}
+.history-empty { display: flex; flex-direction: column; gap: 0.75rem; align-items: center; }
+.history-empty p { margin: 0; }
+
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.history-item {
+  background: #0b0d14;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  padding: 0.65rem 0.75rem;
+  cursor: pointer;
+  transition: all 0.18s;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+.history-item:hover {
+  border-color: #6366f1;
+  background: #111425;
+  transform: translateY(-1px);
+  box-shadow: 0 6px 18px rgba(99, 102, 241, 0.18);
+}
+.history-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+.history-filename {
+  flex: 1;
+  font-size: 0.8rem;
+  color: #e2e8f0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.history-mode {
+  flex-shrink: 0;
+  font-size: 0.62rem;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(99, 102, 241, 0.1);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  letter-spacing: 0.02em;
+}
+.history-mode.mode-simple { background: rgba(56, 189, 248, 0.1); color: #7dd3fc; border-color: rgba(56, 189, 248, 0.25); }
+.history-mode.mode-face   { background: rgba(244, 114, 182, 0.1); color: #f9a8d4; border-color: rgba(244, 114, 182, 0.25); }
+.history-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+  align-items: center;
+  font-size: 0.68rem;
+  color: #64748b;
+  font-variant-numeric: tabular-nums;
+}
+.history-time { display: inline-flex; align-items: center; gap: 0.2rem; }
+.history-dot { opacity: 0.5; }
+.history-item-bottom {
+  display: flex;
+  gap: 0.4rem;
+  flex-wrap: wrap;
+}
+.history-chip {
+  font-size: 0.65rem;
+  padding: 2px 7px;
+  border-radius: 3px;
+  background: rgba(148, 163, 184, 0.08);
+  color: #94a3b8;
+  border: 1px solid rgba(148, 163, 184, 0.15);
+}
+.history-chip.chip-time {
+  background: rgba(52, 211, 153, 0.08);
+  color: #6ee7b7;
+  border-color: rgba(52, 211, 153, 0.25);
+}
+
+/* --- detail modal --- */
+.detail-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 7, 14, 0.8);
+  backdrop-filter: blur(6px);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2rem;
+  animation: fadeIn 0.18s ease;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.detail-modal {
+  background: #0f111a;
+  border: 1px solid #1e293b;
+  border-radius: 14px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6);
+  width: min(1200px, 96vw);
+  max-height: 92vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.detail-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.9rem 1.25rem;
+  border-bottom: 1px solid #1e293b;
+  gap: 1rem;
+}
+.detail-modal-title {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: #f1f5f9;
+  font-weight: 600;
+  font-size: 0.95rem;
+  overflow: hidden;
+}
+.detail-modal-title > span:first-of-type {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail-mode-tag {
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(99, 102, 241, 0.1);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.25);
+  flex-shrink: 0;
+}
+.detail-mode-tag.mode-simple { background: rgba(56, 189, 248, 0.1); color: #7dd3fc; border-color: rgba(56, 189, 248, 0.25); }
+.detail-mode-tag.mode-face   { background: rgba(244, 114, 182, 0.1); color: #f9a8d4; border-color: rgba(244, 114, 182, 0.25); }
+.detail-close {
+  background: transparent;
+  border: 1px solid #1e293b;
+  color: #94a3b8;
+  padding: 0.4rem;
+  border-radius: 6px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+.detail-close:hover { color: #f87171; border-color: #7f1d1d; }
+
+.detail-modal-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 1.25rem;
+  display: grid;
+  grid-template-columns: 1.3fr 1fr;
+  gap: 1.5rem;
+}
+@media (max-width: 960px) {
+  .detail-modal-body { grid-template-columns: 1fr; }
+}
+
+.detail-video-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+  min-width: 0;
+}
+.detail-video-toggle {
+  display: flex;
+  gap: 0.4rem;
+}
+.detail-video-toggle button {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.35rem;
+  padding: 0.5rem 0.6rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  background: #0b0d14;
+  color: #94a3b8;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.detail-video-toggle button.active {
+  background: rgba(99, 102, 241, 0.15);
+  color: #c7d2fe;
+  border-color: #6366f1;
+}
+.detail-video-toggle button.disabled,
+.detail-video-toggle button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.detail-video {
+  width: 100%;
+  max-height: 60vh;
+  background: #000;
+  border-radius: 10px;
+  border: 1px solid #1e293b;
+}
+.detail-video-missing {
+  padding: 3rem;
+  text-align: center;
+  color: #64748b;
+  background: #0b0d14;
+  border: 1px dashed #1e293b;
+  border-radius: 10px;
+}
+
+.detail-info-section {
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+  min-width: 0;
+}
+.detail-meta-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.6rem;
+}
+.detail-meta-grid .meta-item {
+  background: #0b0d14;
+  border: 1px solid #1e293b;
+  border-radius: 8px;
+  padding: 0.5rem 0.7rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.detail-meta-grid .label {
+  font-size: 0.65rem;
+  color: #64748b;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+.detail-meta-grid .value {
+  font-size: 0.85rem;
+  color: #f1f5f9;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.detail-block-title {
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: #cbd5e1;
+  margin: 0 0 0.5rem 0;
+  letter-spacing: 0.02em;
+}
+
+.detail-profiling-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 0.35rem; }
+.detail-profiling-row {
+  display: grid;
+  grid-template-columns: 5.5rem 1fr 2.8rem;
+  align-items: center;
+  gap: 0.5rem;
+  font-size: 0.75rem;
+}
+.detail-profiling-label { color: #94a3b8; }
+.detail-profiling-track { height: 6px; background: #1e293b; border-radius: 3px; overflow: hidden; }
+.detail-profiling-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #6366f1, #a78bfa);
+  border-radius: 3px;
+  transition: width 0.3s;
+}
+.detail-profiling-value { text-align: right; color: #e2e8f0; font-variant-numeric: tabular-nums; }
+
+.animate-spin { animation: spin 1s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 </style>

@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, field
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,41 @@ import numpy as np
 from horse_id.types import HorseDetection
 from horse_id.rider_feature_store import RiderFeatureStore
 from save_rider_faces_to_milvus import _is_lite_uri, init_face_detector, l2_normalize
+
+
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def _has_rider_faces_table(path: Path, collection: str = "rider_faces") -> bool:
+    try:
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as con:
+            row = con.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+                (collection,),
+            ).fetchone()
+            if not row:
+                return False
+            cols = {r[1] for r in con.execute(f"PRAGMA table_info({collection})").fetchall()}
+            return {"embedding", "name"}.issubset(cols)
+    except sqlite3.DatabaseError:
+        return False
+
+
+def _is_sqlite_uri(uri: str, collection: str = "rider_faces") -> bool:
+    """Return True only for plain SQLite rider DBs (not Milvus Lite, which also uses SQLite internally)."""
+    u = (uri or "").strip()
+    if not u or u.startswith(("http://", "https://")):
+        return False
+    p = Path(u).expanduser()
+    if not p.is_file():
+        return u.lower().endswith((".sqlite", ".sqlite.db"))
+    try:
+        with open(p, "rb") as f:
+            if f.read(16) != _SQLITE_MAGIC:
+                return False
+    except OSError:
+        return False
+    return _has_rider_faces_table(p, collection)
 
 
 @dataclass
@@ -71,14 +107,19 @@ class _FaceIdentityBackend:
         self.min_score = float(min_score)
         self.collection_name = collection_name
         self.dim = int(dim)
-        self.use_lite = _is_lite_uri(db_uri)
+        self.use_sqlite = _is_sqlite_uri(db_uri, collection_name)
+        self.use_lite = (not self.use_sqlite) and _is_lite_uri(db_uri)
         self.face_detector = init_face_detector(
             device=device,
             models_dir=Path(models_dir).resolve() if models_dir else None,
         )
         self.client = None
         self.collection = None
-        if self.use_lite:
+        self._sqlite_names: list[str] = []
+        self._sqlite_embs: np.ndarray = np.zeros((0, self.dim), dtype=np.float32)
+        if self.use_sqlite:
+            self._load_sqlite(db_uri)
+        elif self.use_lite:
             from pymilvus import MilvusClient
 
             self.client = MilvusClient(str(Path(db_uri).expanduser().resolve()))
@@ -89,7 +130,41 @@ class _FaceIdentityBackend:
             self.collection = Collection(name=collection_name)
             self.collection.load()
 
+    def _load_sqlite(self, db_uri: str) -> None:
+        path = Path(db_uri).expanduser().resolve()
+        with sqlite3.connect(f"file:{path}?mode=ro", uri=True) as con:
+            rows = con.execute(
+                f"SELECT name, embedding FROM {self.collection_name}"
+            ).fetchall()
+        names: list[str] = []
+        vecs: list[np.ndarray] = []
+        for name, blob in rows:
+            if not name or not blob:
+                continue
+            if isinstance(name, bytes):
+                name = name.decode("utf-8", errors="replace")
+            v = np.frombuffer(blob, dtype=np.float32)
+            if v.size != self.dim:
+                continue
+            names.append(str(name))
+            vecs.append(v)
+        self._sqlite_names = names
+        self._sqlite_embs = np.stack(vecs) if vecs else np.zeros((0, self.dim), dtype=np.float32)
+
     def _query_name(self, embedding: list[float]) -> tuple[str, float] | None:
+        if self.use_sqlite:
+            if self._sqlite_embs.shape[0] == 0:
+                return None
+            q = np.asarray(embedding, dtype=np.float32).reshape(-1)
+            if q.size != self.dim:
+                return None
+            scores = self._sqlite_embs @ q
+            idx = int(np.argmax(scores))
+            score = float(scores[idx])
+            if score < self.min_score:
+                return None
+            return self._sqlite_names[idx], score
+
         if self.use_lite and self.client is not None:
             res = self.client.search(
                 collection_name=self.collection_name,
@@ -138,6 +213,8 @@ class _FaceIdentityBackend:
     def get_all_known_names(self) -> set[str]:
         """Return all distinct rider names registered in the face database."""
         names: set[str] = set()
+        if self.use_sqlite:
+            return {n for n in self._sqlite_names if n}
         if self.use_lite and self.client is not None:
             results = self.client.query(
                 collection_name=self.collection_name,
@@ -246,7 +323,8 @@ class RiderIdentityModule:
         uri = (config.face_db_uri or "").strip()
         if uri:
             try:
-                if _is_lite_uri(uri) and not Path(uri).expanduser().resolve().exists():
+                is_local = not uri.startswith(("http://", "https://"))
+                if is_local and not Path(uri).expanduser().resolve().exists():
                     raise FileNotFoundError(f"face db not found: {uri}")
                 self._face_backend = _FaceIdentityBackend(
                     db_uri=uri,
@@ -256,7 +334,8 @@ class RiderIdentityModule:
                     device=config.face_device,
                     models_dir=config.face_models_dir,
                 )
-            except Exception:
+            except Exception as e:
+                print(f"[rider_identity] face backend init failed: {type(e).__name__}: {e}")
                 self._face_backend = None
 
         self._known_face_names: set[str] = set()
