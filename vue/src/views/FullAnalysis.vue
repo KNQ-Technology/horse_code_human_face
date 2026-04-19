@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
-import { Upload, FileVideo, CheckCircle, Loader2, PlayCircle, History, Plus, Info, Camera, CameraOff, Clock, X, RefreshCw } from 'lucide-vue-next';
+import { Upload, FileVideo, CheckCircle, Loader2, PlayCircle, History, Plus, Info, Camera, CameraOff, Clock, X, RefreshCw, Download } from 'lucide-vue-next';
 import axios from 'axios';
+import html2canvas from 'html2canvas';
 
 type HistoryItem = {
   task_id: string;
@@ -169,6 +170,65 @@ const openHistoryDetail = async (item: HistoryItem) => {
 };
 
 const closeHistoryDetail = () => { selectedHistory.value = null; };
+
+const exportingHistory = ref(false);
+const exportProgress = ref({ current: 0, total: 0, phase: '' });
+const exportCardItem = ref<HistoryDetail | null>(null);
+const exportCardEl = ref<HTMLElement | null>(null);
+
+const captureItemPng = async (item: HistoryItem): Promise<Blob | null> => {
+  try {
+    const r = await axios.get(`${API_BASE}${item.summary_url}`);
+    if (r.data?.code !== 200) return null;
+    exportCardItem.value = r.data.data as HistoryDetail;
+    await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
+    const el = exportCardEl.value;
+    if (!el) return null;
+    const canvas = await html2canvas(el, { backgroundColor: '#0f111a', scale: 1.5, useCORS: true, logging: false });
+    return await new Promise<Blob | null>((resolve) => canvas.toBlob((b) => resolve(b), 'image/png'));
+  } catch {
+    return null;
+  }
+};
+
+const exportHistory = async () => {
+  if (exportingHistory.value) return;
+  const items = filteredHistoryItems.value;
+  if (!items.length) return;
+  exportingHistory.value = true;
+  exportProgress.value = { current: 0, total: items.length, phase: '渲染截图' };
+
+  const form = new FormData();
+  form.append('mode', historyFilter.value);
+  try {
+    for (let i = 0; i < items.length; i++) {
+      exportProgress.value = { current: i + 1, total: items.length, phase: '渲染截图' };
+      const blob = await captureItemPng(items[i]);
+      if (blob) form.append('screenshots', blob, `${items[i].task_id}.png`);
+    }
+    exportCardItem.value = null;
+    exportProgress.value = { current: items.length, total: items.length, phase: '后端打包（视频较大需 1-2 分钟）' };
+    const resp = await fetch(`${API_BASE}/api/export`, { method: 'POST', body: form });
+    if (!resp.ok) throw new Error(`export failed: ${resp.status}`);
+    const zipBlob = await resp.blob();
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const url = URL.createObjectURL(zipBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `export_${ts}_${historyFilter.value}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  } catch (e) {
+    console.error(e);
+    alert('导出失败，看控制台');
+  } finally {
+    exportingHistory.value = false;
+    exportProgress.value = { current: 0, total: 0, phase: '' };
+    exportCardItem.value = null;
+  }
+};
 
 const formatDuration = (s: number | null | undefined) => {
   if (s == null || !Number.isFinite(s)) return '—';
@@ -556,9 +616,14 @@ onUnmounted(() => {
             分析记录
             <span class="history-count" v-if="historyItems.length">{{ historyItems.length }}</span>
           </h2>
-          <button class="history-refresh" :disabled="historyLoading" @click="fetchHistory" title="刷新">
-            <RefreshCw :size="14" :class="{ 'animate-spin': historyLoading }" />
-          </button>
+          <div class="history-actions">
+            <button class="history-refresh" :disabled="exportingHistory || !filteredHistoryItems.length" @click="exportHistory" :title="`导出当前 (${filteredHistoryItems.length} 条)`">
+              <Download :size="14" />
+            </button>
+            <button class="history-refresh" :disabled="historyLoading" @click="fetchHistory" title="刷新">
+              <RefreshCw :size="14" :class="{ 'animate-spin': historyLoading }" />
+            </button>
+          </div>
         </div>
         <div class="history-filter-tabs">
           <button :class="{ active: historyFilter === 'all' }" @click="historyFilter = 'all'">
@@ -609,6 +674,74 @@ onUnmounted(() => {
           </ul>
         </div>
       </section>
+    </div>
+
+    <div v-if="exportingHistory" class="export-overlay">
+      <div class="export-card">
+        <Loader2 class="animate-spin" :size="28" />
+        <div class="export-phase">{{ exportProgress.phase }}</div>
+        <div v-if="exportProgress.total" class="export-progress">
+          {{ exportProgress.current }} / {{ exportProgress.total }}
+        </div>
+        <div v-if="exportProgress.total" class="export-bar-track">
+          <div class="export-bar-fill" :style="{ width: (exportProgress.current / exportProgress.total * 100) + '%' }"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="export-offscreen" aria-hidden="true">
+      <div v-if="exportCardItem" ref="exportCardEl" class="export-render-card">
+        <div class="export-render-head">
+          <h3>{{ exportCardItem.original_filename }}</h3>
+          <span class="export-render-mode" :class="'mode-' + exportCardItem.mode">{{ modeLabel(exportCardItem.mode) }}</span>
+        </div>
+        <div class="detail-meta-grid">
+          <div class="meta-item"><span class="label">完成时间</span><span class="value">{{ exportCardItem.processed_at || '—' }}</span></div>
+          <div class="meta-item"><span class="label">视频时长</span><span class="value">{{ exportCardItem.duration || '—' }}</span></div>
+          <div class="meta-item"><span class="label">分辨率</span><span class="value">{{ exportCardItem.resolution || '—' }}</span></div>
+          <div class="meta-item"><span class="label">处理耗时</span><span class="value">{{ formatDuration(exportCardItem.process_duration_seconds) }}<span v-if="speedRatio(exportCardItem.process_duration_seconds, exportCardItem.duration)" class="value-sub">（{{ speedRatio(exportCardItem.process_duration_seconds, exportCardItem.duration) }}）</span></span></div>
+          <div class="meta-item"><span class="label">分析模式</span><span class="value">{{ modeLabel(exportCardItem.mode) }}</span></div>
+          <div class="meta-item"><span class="label">检测条数</span><span class="value">{{ exportCardItem.detection_count }}</span></div>
+        </div>
+        <div v-if="exportCardItem.detections.length" class="detail-block">
+          <h3 class="detail-block-title">检测结果</h3>
+          <div class="table-container">
+            <table class="data-table">
+              <thead><tr><th>时间</th><th>目标名称</th><th>置信度</th></tr></thead>
+              <tbody>
+                <tr v-for="(d, i) in exportCardItem.detections" :key="i">
+                  <td>{{ d.timestamp }}</td>
+                  <td>{{ d.person_name || d.horse_id || '—' }}</td>
+                  <td class="conf-cell">{{ d.confidence || '—' }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div v-if="(exportCardItem.profiling && Object.keys(exportCardItem.profiling).length)" class="detail-block">
+          <h3 class="detail-block-title">各阶段耗时占比 <span class="detail-block-hint">(相对墙钟时间)</span></h3>
+          <div class="detail-profiling-group">
+            <div class="detail-profiling-group-head"><span>主管线（串行）</span></div>
+            <ul class="detail-profiling-list">
+              <li v-for="k in ['read','yolo','face_det','enhance','ocr','vlm','rider_id']" :key="k" v-show="exportCardItem.profiling[k]" class="detail-profiling-row">
+                <span class="detail-profiling-label">{{ PROFILING_LABELS[k] }}</span>
+                <div class="detail-profiling-track"><div class="detail-profiling-fill" :style="{ width: (exportCardItem.profiling[k] || 0) + '%' }"></div></div>
+                <span class="detail-profiling-value">{{ (exportCardItem.profiling[k] || 0).toFixed(1) }}%</span>
+              </li>
+            </ul>
+          </div>
+          <div class="detail-profiling-group">
+            <div class="detail-profiling-group-head"><span>编码线程（与主管线并行）</span></div>
+            <ul class="detail-profiling-list">
+              <li v-for="k in ['viz','write']" :key="k" v-show="exportCardItem.profiling[k]" class="detail-profiling-row">
+                <span class="detail-profiling-label">{{ PROFILING_LABELS[k] }}</span>
+                <div class="detail-profiling-track"><div class="detail-profiling-fill detail-profiling-fill-parallel" :style="{ width: (exportCardItem.profiling[k] || 0) + '%' }"></div></div>
+                <span class="detail-profiling-value">{{ (exportCardItem.profiling[k] || 0).toFixed(1) }}%</span>
+              </li>
+            </ul>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div v-if="selectedHistory" class="detail-modal-backdrop" @click.self="closeHistoryDetail">
@@ -1424,6 +1557,7 @@ onUnmounted(() => {
   border-radius: 10px;
   vertical-align: 2px;
 }
+.history-actions { display: flex; gap: 0.35rem; }
 .history-refresh {
   background: transparent;
   border: 1px solid #1e293b;
@@ -1818,6 +1952,82 @@ onUnmounted(() => {
   font-variant-numeric: tabular-nums;
   font-weight: 700;
 }
+
+/* --- export overlay + offscreen render card --- */
+.export-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(5, 7, 14, 0.85);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(6px);
+}
+.export-card {
+  background: #0f111a;
+  border: 1px solid #1e293b;
+  border-radius: 12px;
+  padding: 1.5rem 2rem;
+  min-width: 260px;
+  color: #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.6rem;
+}
+.export-phase { font-size: 0.85rem; font-weight: 600; color: #cbd5e1; }
+.export-progress { font-size: 0.75rem; color: #94a3b8; font-variant-numeric: tabular-nums; }
+.export-bar-track { width: 220px; height: 6px; background: #1e293b; border-radius: 3px; overflow: hidden; }
+.export-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #6366f1, #a78bfa);
+  transition: width 0.25s;
+}
+
+.export-offscreen {
+  position: fixed;
+  left: -99999px;
+  top: 0;
+  opacity: 1;
+  pointer-events: none;
+}
+.export-render-card {
+  width: 720px;
+  background: #0f111a;
+  padding: 1.25rem 1.5rem;
+  color: #e2e8f0;
+  font-family: inherit;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+.export-render-head {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  border-bottom: 1px solid #1e293b;
+  padding-bottom: 0.6rem;
+}
+.export-render-head h3 {
+  flex: 1;
+  margin: 0;
+  font-size: 1rem;
+  color: #f1f5f9;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.export-render-mode {
+  font-size: 0.65rem;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(99, 102, 241, 0.15);
+  color: #a5b4fc;
+  border: 1px solid rgba(99, 102, 241, 0.3);
+}
+.export-render-mode.mode-simple { background: rgba(56, 189, 248, 0.15); color: #7dd3fc; border-color: rgba(56, 189, 248, 0.3); }
+.export-render-mode.mode-face { background: rgba(244, 114, 182, 0.15); color: #f9a8d4; border-color: rgba(244, 114, 182, 0.3); }
 
 .animate-spin { animation: spin 1s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }

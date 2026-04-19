@@ -4,14 +4,18 @@ from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
+from starlette.background import BackgroundTask
 import traceback
 import time
 import uuid
 import os
 import re
+import io
 import json
 import shutil
+import tempfile
 import threading
+import zipfile
 from collections import deque
 from pathlib import Path
 from typing import Dict
@@ -362,6 +366,211 @@ async def get_history_detail(task_id: str):
     if not entry:
         raise HTTPException(status_code=404, detail="history not found")
     return {"code": 200, "data": entry}
+
+
+_MODE_LABEL = {"full": "骑手识别", "simple": "号码识别", "face": "仅人脸"}
+_STAGE_KEYS = ["read", "yolo", "face_det", "enhance", "ocr", "vlm", "rider_id", "viz", "write"]
+_STAGE_LABELS = {
+    "read": "视频读取", "yolo": "YOLO+追踪", "face_det": "人脸检测",
+    "enhance": "图像增强", "ocr": "OCR识别", "vlm": "VLM回退",
+    "rider_id": "骑手识别", "viz": "结果渲染", "write": "视频编码",
+}
+_MAIN_STAGE_KEYS = ["read", "yolo", "face_det", "enhance", "ocr", "vlm", "rider_id"]
+_PARALLEL_STAGE_KEYS = ["viz", "write"]
+
+
+def _parse_video_duration(s: str | None) -> float | None:
+    if not s:
+        return None
+    parts = s.split(":")
+    try:
+        nums = [float(p) for p in parts]
+    except ValueError:
+        return None
+    if len(nums) == 3:
+        return nums[0] * 3600 + nums[1] * 60 + nums[2]
+    if len(nums) == 2:
+        return nums[0] * 60 + nums[1]
+    if len(nums) == 1:
+        return nums[0]
+    return None
+
+
+def _safe_folder_name(s: str, maxlen: int = 80) -> str:
+    s = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", s).strip()
+    return s[:maxlen] or "unnamed"
+
+
+def _build_export_workbook_bytes(items: list[dict]) -> bytes:
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "分析记录"
+
+    headers = [
+        "任务ID", "原始文件名", "分析模式", "完成时间",
+        "视频时长", "视频分辨率", "处理耗时(秒)", "耗时/视频时长",
+        "检测条数", "检测详情",
+        "主管线总占比%", "编码线程总占比%",
+    ] + [f"{_STAGE_LABELS[k]}%" for k in _STAGE_KEYS]
+    ws.append(headers)
+
+    for it in items:
+        proc = it.get("process_duration_seconds")
+        video_dur_sec = _parse_video_duration(it.get("duration"))
+        ratio = (
+            f"{proc / video_dur_sec:.2f}×"
+            if proc is not None and video_dur_sec and video_dur_sec > 0
+            else ""
+        )
+        detections = it.get("detections") or []
+        det_lines = []
+        for d in detections:
+            ts = d.get("timestamp") or "—"
+            name = d.get("person_name") or d.get("horse_id") or "—"
+            conf = d.get("confidence") or ""
+            det_lines.append(f"[{ts}] {name} ({conf})" if conf else f"[{ts}] {name}")
+        profiling = it.get("profiling") or {}
+        main_sum = sum(float(profiling.get(k, 0) or 0) for k in _MAIN_STAGE_KEYS)
+        parallel_sum = sum(float(profiling.get(k, 0) or 0) for k in _PARALLEL_STAGE_KEYS)
+
+        row = [
+            it.get("task_id") or "",
+            it.get("original_filename") or "",
+            _MODE_LABEL.get(it.get("mode") or "", it.get("mode") or ""),
+            it.get("processed_at") or "",
+            it.get("duration") or "",
+            it.get("resolution") or "",
+            proc if proc is not None else "",
+            ratio,
+            it.get("detection_count") or 0,
+            "\n".join(det_lines),
+            round(main_sum, 1) if main_sum else "",
+            round(parallel_sum, 1) if parallel_sum else "",
+        ] + [
+            round(float(profiling.get(k, 0) or 0), 1) if profiling.get(k) not in (None, "") else ""
+            for k in _STAGE_KEYS
+        ]
+        ws.append(row)
+
+    # column widths
+    widths = [10, 38, 10, 19, 9, 11, 12, 13, 10, 48, 12, 14] + [10] * len(_STAGE_KEYS)
+    for i, w in enumerate(widths, start=1):
+        ws.column_dimensions[chr(64 + i) if i <= 26 else f"A{chr(64 + i - 26)}"].width = w
+    ws.freeze_panes = "A2"
+
+    bio = io.BytesIO()
+    wb.save(bio)
+    return bio.getvalue()
+
+
+def _gather_export_items(mode: str) -> list[dict]:
+    if mode not in {"all", "full", "simple", "face"}:
+        raise HTTPException(status_code=400, detail="mode must be all|full|simple|face")
+    root = Path(VIDEOS_DIR)
+    if not root.is_dir():
+        raise HTTPException(status_code=404, detail="videos dir missing")
+    summaries = sorted(
+        root.glob(f"processed_*{_SUMMARY_SUFFIX}"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    items: list[dict] = []
+    for p in summaries:
+        e = _history_entry(p, full=True)
+        if not e:
+            continue
+        if mode != "all" and e.get("mode") != mode:
+            continue
+        items.append(e)
+    if not items:
+        raise HTTPException(status_code=404, detail="no records matching filter")
+    return items
+
+
+def _build_export_zip(items: list[dict], mode: str, screenshots: dict[str, bytes] | None = None) -> tuple[str, str]:
+    """Build ZIP on disk. Returns (tmp_path, download_filename)."""
+    root = Path(VIDEOS_DIR)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    export_root = f"export_{ts}_{mode}"
+    tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+    try:
+        with zipfile.ZipFile(tmp_path, "w", zipfile.ZIP_STORED, allowZip64=True) as zf:
+            zf.writestr(
+                f"{export_root}/all_summary.xlsx",
+                _build_export_workbook_bytes(items),
+            )
+            for it in items:
+                stem = Path(it.get("original_filename") or "video").stem
+                task_id = it.get("task_id") or "unknown"
+                folder = f"{export_root}/{task_id[:8]}_{_safe_folder_name(stem)}"
+                orig_url = it.get("original_video_url")
+                proc_url = it.get("processed_video_url")
+                if orig_url:
+                    orig_path = root / orig_url.removeprefix("/videos/")
+                    if orig_path.is_file():
+                        zf.write(orig_path, f"{folder}/original{orig_path.suffix}")
+                if proc_url:
+                    proc_path = root / proc_url.removeprefix("/videos/")
+                    if proc_path.is_file():
+                        zf.write(proc_path, f"{folder}/processed{proc_path.suffix}")
+                if screenshots and task_id in screenshots:
+                    zf.writestr(f"{folder}/detail.png", screenshots[task_id])
+    except Exception:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+    return tmp_path, f"export_{ts}_{mode}.zip"
+
+
+@app.get("/api/export")
+async def export_history_get(mode: str = "all"):
+    """Quick export (no screenshots) — videos + xlsx only."""
+    items = _gather_export_items(mode)
+    tmp_path, filename = _build_export_zip(items, mode)
+    return FileResponse(
+        tmp_path,
+        media_type="application/zip",
+        filename=filename,
+        background=BackgroundTask(os.unlink, tmp_path),
+    )
+
+
+@app.post("/api/export")
+async def export_history_post(
+    mode: str = Form("all"),
+    screenshots: list[UploadFile] = File(default=[]),
+):
+    """Export with client-provided detail-modal screenshots bundled into each task folder.
+
+    Each screenshot's uploaded filename must be `{task_id}.png` (or start with task_id).
+    Missing screenshots are silently skipped; the xlsx still has all data.
+    """
+    items = _gather_export_items(mode)
+    shot_map: dict[str, bytes] = {}
+    valid_ids = {it.get("task_id") for it in items if it.get("task_id")}
+    for up in screenshots or []:
+        raw = await up.read()
+        if not raw:
+            continue
+        # match filename to a known task_id
+        base = Path(up.filename or "").stem
+        for tid in valid_ids:
+            if tid and (base == tid or base.startswith(tid)):
+                shot_map[tid] = raw
+                break
+    tmp_path, filename = _build_export_zip(items, mode, screenshots=shot_map)
+    return FileResponse(
+        tmp_path,
+        media_type="application/zip",
+        filename=filename,
+        background=BackgroundTask(os.unlink, tmp_path),
+    )
 
 
 @app.get("/api/system/metrics")
