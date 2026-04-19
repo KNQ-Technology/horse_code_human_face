@@ -1,3 +1,5 @@
+import _nvidia_dll_fix  # noqa: F401 — must run before onnxruntime/paddle imports on Windows
+
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -138,6 +140,33 @@ def process_video_task(task_id: str, filename: str, mode: str = "full"):
         tasks[task_id]["status"] = "error"
         tasks[task_id]["message"] = f"处理失败: {_sanitize_error_message(e)}"
 
+_WIN_ILLEGAL_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _recover_filename(raw: str | None) -> str:
+    """Decode filename sent by clients that don't use RFC 5987 UTF-8 encoding.
+
+    Starlette treats the multipart `filename` param as latin-1 per the HTTP spec.
+    Windows git-bash curl sends raw GBK/UTF-8 bytes instead, so we re-encode as
+    latin-1 and try UTF-8 then GBK to recover the intended name.
+    """
+    if not raw:
+        return "upload.mp4"
+    try:
+        b = raw.encode("latin-1")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return _WIN_ILLEGAL_CHARS_RE.sub("_", raw)
+    for enc in ("utf-8", "gbk", "big5"):
+        try:
+            decoded = b.decode(enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    else:
+        decoded = raw
+    return _WIN_ILLEGAL_CHARS_RE.sub("_", decoded)
+
+
 @app.post("/api/upload")
 async def upload_video(
     video: UploadFile = File(...),
@@ -150,7 +179,8 @@ async def upload_video(
         )
     task_id = str(uuid.uuid4())
 
-    file_path = os.path.join(UPLOAD_DIR, f"{task_id}_{video.filename}")
+    safe_filename = _recover_filename(video.filename)
+    file_path = os.path.join(UPLOAD_DIR, f"{task_id}_{safe_filename}")
 
     os.makedirs(UPLOAD_DIR, exist_ok=True)
 
@@ -174,7 +204,7 @@ async def upload_video(
             "queue_position": queue_position,
             "file_path": file_path,
         }
-        _task_queue.append((task_id, video.filename, mode))
+        _task_queue.append((task_id, safe_filename, mode))
         _queue_event.set()
 
     return {

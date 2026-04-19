@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import _nvidia_dll_fix  # noqa: F401 — must run before onnxruntime/paddle imports on Windows
+
 import json
 import os
 import shutil
