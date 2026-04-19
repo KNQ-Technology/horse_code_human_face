@@ -576,10 +576,11 @@ const startUpload = async () => {
 
 .page-content {
   flex: 1;
-  padding: 2rem;
-  max-width: 1400px;
+  padding: 1.5rem 2rem;
+  max-width: min(1800px, 100%);
   margin: 0 auto;
   width: 100%;
+  box-sizing: border-box;
 }
 
 .content-grid {

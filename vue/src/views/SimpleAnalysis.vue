@@ -686,10 +686,11 @@ onUnmounted(() => {
 <style scoped>
 .page-content {
   flex: 1;
-  padding: 2rem;
-  max-width: 1400px;
+  padding: 1.5rem 2rem;
+  max-width: min(1800px, 100%);
   margin: 0 auto;
   width: 100%;
+  box-sizing: border-box;
 }
 
 /* --- guide module --- */
@@ -863,16 +864,18 @@ onUnmounted(() => {
 
 .content-grid {
   display: grid;
-  grid-template-columns: 1.6fr 1fr 0.9fr;
+  grid-template-columns: 0.9fr 1.6fr 1fr;
   gap: 1.25rem;
   height: calc(100vh - 128px);
 }
+.history-panel { order: -1; }
 
 @media (max-width: 1280px) {
   .content-grid {
     grid-template-columns: 1.4fr 1fr;
   }
   .history-panel {
+    order: 99;
     grid-column: 1 / -1;
     height: auto;
     max-height: 320px;

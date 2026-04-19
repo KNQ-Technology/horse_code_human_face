@@ -363,7 +363,7 @@ onUnmounted(() => {
 }
 
 .header-content {
-  max-width: 1600px;
+  max-width: min(1800px, 100%);
   margin: 0 auto;
   min-height: 64px;
   padding: 0.5rem 2rem;
@@ -371,6 +371,7 @@ onUnmounted(() => {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
+  box-sizing: border-box;
 }
 
 .logo {
