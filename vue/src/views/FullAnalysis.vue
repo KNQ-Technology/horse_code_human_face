@@ -120,7 +120,22 @@ const historyLoading = ref(false);
 const historyError = ref('');
 const selectedHistory = ref<HistoryDetail | null>(null);
 const detailVideoMode = ref<'original' | 'processed'>('processed');
+const historyFilter = ref<'all' | 'full' | 'simple' | 'face'>('all');
 let historyTimer: ReturnType<typeof setInterval> | undefined;
+
+const filteredHistoryItems = computed(() => {
+  if (historyFilter.value === 'all') return historyItems.value;
+  return historyItems.value.filter((it) => it.mode === historyFilter.value);
+});
+const historyModeCount = computed(() => {
+  const c = { all: historyItems.value.length, full: 0, simple: 0, face: 0 };
+  for (const it of historyItems.value) {
+    if (it.mode === 'full') c.full++;
+    else if (it.mode === 'simple') c.simple++;
+    else if (it.mode === 'face') c.face++;
+  }
+  return c;
+});
 
 const toAbsUrl = (u: string | null) => (!u ? null : (u.startsWith('http') ? u : `${API_BASE}${u}`));
 
@@ -161,6 +176,22 @@ const formatDuration = (s: number | null | undefined) => {
   const m = Math.floor(s / 60);
   const r = (s - m * 60).toFixed(1);
   return `${m}m${r}s`;
+};
+
+const parseVideoDurationSeconds = (raw: string | null | undefined): number | null => {
+  if (!raw) return null;
+  const parts = raw.split(':').map((p) => Number(p));
+  if (parts.some((n) => !Number.isFinite(n))) return null;
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  if (parts.length === 1) return parts[0];
+  return null;
+};
+
+const speedRatio = (proc: number | null | undefined, videoRaw: string | null | undefined): string | null => {
+  const video = parseVideoDurationSeconds(videoRaw);
+  if (proc == null || !Number.isFinite(proc) || !video || video <= 0) return null;
+  return `${(proc / video).toFixed(2)}×`;
 };
 
 const formatRelTime = (mtime: number) => {
@@ -529,15 +560,26 @@ onUnmounted(() => {
             <RefreshCw :size="14" :class="{ 'animate-spin': historyLoading }" />
           </button>
         </div>
+        <div class="history-filter-tabs">
+          <button :class="{ active: historyFilter === 'all' }" @click="historyFilter = 'all'">
+            全部 <span class="tab-count">{{ historyModeCount.all }}</span>
+          </button>
+          <button :class="{ active: historyFilter === 'full' }" @click="historyFilter = 'full'">
+            骑手识别 <span class="tab-count">{{ historyModeCount.full }}</span>
+          </button>
+          <button :class="{ active: historyFilter === 'simple' }" @click="historyFilter = 'simple'">
+            号码识别 <span class="tab-count">{{ historyModeCount.simple }}</span>
+          </button>
+        </div>
         <div class="panel-body history-panel-body">
           <div v-if="historyError" class="history-error">{{ historyError }}</div>
-          <div v-else-if="!historyItems.length && !historyLoading" class="history-empty">
+          <div v-else-if="!filteredHistoryItems.length && !historyLoading" class="history-empty">
             <FileVideo :size="32" />
-            <p>暂无历史记录</p>
+            <p>{{ historyItems.length ? '该模式下暂无记录' : '暂无历史记录' }}</p>
           </div>
           <ul v-else class="history-list">
             <li
-              v-for="item in historyItems"
+              v-for="item in filteredHistoryItems"
               :key="item.task_id"
               class="history-item"
               @click="openHistoryDetail(item)"
@@ -547,16 +589,20 @@ onUnmounted(() => {
                 <span class="history-mode" :class="'mode-' + item.mode">{{ modeLabel(item.mode) }}</span>
               </div>
               <div class="history-item-meta">
-                <span class="history-time"><Clock :size="11" /> {{ formatRelTime(item.mtime) }}</span>
-                <span v-if="item.duration" class="history-dot">·</span>
+                <span class="history-time" :title="formatRelTime(item.mtime)"><Clock :size="11" /> {{ item.processed_at || formatRelTime(item.mtime) }}</span>
+              </div>
+              <div class="history-item-meta history-item-meta-sub" v-if="item.duration || item.resolution">
                 <span v-if="item.duration">{{ item.duration }}</span>
-                <span v-if="item.resolution" class="history-dot">·</span>
+                <span v-if="item.duration && item.resolution" class="history-dot">·</span>
                 <span v-if="item.resolution">{{ item.resolution }}</span>
               </div>
               <div class="history-item-bottom">
                 <span class="history-chip">检测 {{ item.detection_count }}</span>
                 <span v-if="item.process_duration_seconds != null" class="history-chip chip-time">
                   耗时 {{ formatDuration(item.process_duration_seconds) }}
+                </span>
+                <span v-if="speedRatio(item.process_duration_seconds, item.duration)" class="history-chip chip-ratio" title="处理耗时 / 视频时长">
+                  {{ speedRatio(item.process_duration_seconds, item.duration) }}
                 </span>
               </div>
             </li>
@@ -611,7 +657,7 @@ onUnmounted(() => {
               <div class="meta-item"><span class="label">完成时间</span><span class="value">{{ selectedHistory.processed_at || '—' }}</span></div>
               <div class="meta-item"><span class="label">视频时长</span><span class="value">{{ selectedHistory.duration || '—' }}</span></div>
               <div class="meta-item"><span class="label">分辨率</span><span class="value">{{ selectedHistory.resolution || '—' }}</span></div>
-              <div class="meta-item"><span class="label">处理耗时</span><span class="value">{{ formatDuration(selectedHistory.process_duration_seconds) }}</span></div>
+              <div class="meta-item"><span class="label">处理耗时</span><span class="value">{{ formatDuration(selectedHistory.process_duration_seconds) }}<span v-if="speedRatio(selectedHistory.process_duration_seconds, selectedHistory.duration)" class="value-sub">（{{ speedRatio(selectedHistory.process_duration_seconds, selectedHistory.duration) }}）</span></span></div>
               <div class="meta-item"><span class="label">分析模式</span><span class="value">{{ modeLabel(selectedHistory.mode) }}</span></div>
               <div class="meta-item"><span class="label">检测条数</span><span class="value">{{ selectedHistory.detection_count }}</span></div>
             </div>
@@ -1393,6 +1439,53 @@ onUnmounted(() => {
 .history-refresh:hover:not(:disabled) { color: #e2e8f0; border-color: #334155; }
 .history-refresh:disabled { opacity: 0.5; cursor: not-allowed; }
 
+.history-filter-tabs {
+  display: flex;
+  gap: 0.3rem;
+  padding: 0.35rem 0.5rem 0.5rem;
+  border-bottom: 1px solid #1e293b;
+}
+.history-filter-tabs button {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.3rem;
+  padding: 0.35rem 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  background: transparent;
+  color: #64748b;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: all 0.15s;
+  white-space: nowrap;
+}
+.history-filter-tabs button:hover { color: #cbd5e1; background: rgba(148, 163, 184, 0.06); }
+.history-filter-tabs button.active {
+  background: rgba(99, 102, 241, 0.15);
+  color: #c7d2fe;
+  border-color: rgba(99, 102, 241, 0.35);
+}
+.history-filter-tabs .tab-count {
+  font-size: 0.62rem;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: rgba(148, 163, 184, 0.12);
+  color: #94a3b8;
+  font-weight: 700;
+}
+.history-filter-tabs button.active .tab-count {
+  background: rgba(99, 102, 241, 0.25);
+  color: #e0e7ff;
+}
+
+.history-item-meta-sub {
+  margin-top: -0.1rem;
+  opacity: 0.85;
+}
+
 .history-panel-body {
   flex: 1;
   min-height: 0;
@@ -1489,6 +1582,17 @@ onUnmounted(() => {
   background: rgba(52, 211, 153, 0.08);
   color: #6ee7b7;
   border-color: rgba(52, 211, 153, 0.25);
+}
+.history-chip.chip-ratio {
+  background: rgba(251, 146, 60, 0.08);
+  color: #fdba74;
+  border-color: rgba(251, 146, 60, 0.25);
+}
+.detail-meta-grid .value-sub {
+  font-size: 0.7rem;
+  color: #94a3b8;
+  font-weight: 500;
+  margin-left: 0.1rem;
 }
 
 /* --- detail modal --- */
