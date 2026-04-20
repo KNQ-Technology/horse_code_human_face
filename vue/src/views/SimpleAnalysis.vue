@@ -208,9 +208,11 @@ const exportHistory = async () => {
   form.append('mode', historyFilter.value);
   try {
     for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (!item) continue;
       exportProgress.value = { current: i + 1, total: items.length, phase: '渲染截图' };
-      const blob = await captureItemPng(items[i]);
-      if (blob) form.append('screenshots', blob, `${items[i].task_id}.png`);
+      const blob = await captureItemPng(item);
+      if (blob) form.append('screenshots', blob, `${item.task_id}.png`);
     }
     exportCardItem.value = null;
     exportProgress.value = { current: items.length, total: items.length, phase: '后端打包（视频较大需 1-2 分钟）' };
@@ -248,9 +250,20 @@ const parseVideoDurationSeconds = (raw: string | null | undefined): number | nul
   if (!raw) return null;
   const parts = raw.split(':').map((p) => Number(p));
   if (parts.some((n) => !Number.isFinite(n))) return null;
-  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
-  if (parts.length === 2) return parts[0] * 60 + parts[1];
-  if (parts.length === 1) return parts[0];
+  if (parts.length === 3) {
+    const [h, m, s] = parts;
+    if (h === undefined || m === undefined || s === undefined) return null;
+    return h * 3600 + m * 60 + s;
+  }
+  if (parts.length === 2) {
+    const [m, s] = parts;
+    if (m === undefined || s === undefined) return null;
+    return m * 60 + s;
+  }
+  if (parts.length === 1) {
+    const [s] = parts;
+    return s === undefined ? null : s;
+  }
   return null;
 };
 
